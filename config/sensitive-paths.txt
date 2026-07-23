@@ -1,0 +1,50 @@
+# Categorie|Route
+Administration|/admin
+Administration|/administrator
+Administration|/administration
+Administration|/manage
+Administration|/management
+Administration|/console
+Administration|/dashboard
+Monitoring / diagnostic|/metrics
+Monitoring / diagnostic|/health
+Monitoring / diagnostic|/status
+Monitoring / diagnostic|/debug
+Monitoring / diagnostic|/trace
+Monitoring / diagnostic|/actuator
+Monitoring / diagnostic|/actuator/health
+Monitoring / diagnostic|/actuator/env
+Monitoring / diagnostic|/server-status
+API / documentation|/api
+API / documentation|/rest
+API / documentation|/graphql
+API / documentation|/graphiql
+API / documentation|/swagger
+API / documentation|/swagger-ui
+API / documentation|/swagger.json
+API / documentation|/openapi.json
+API / documentation|/api-docs
+Fichiers / transferts|/files
+Fichiers / transferts|/file
+Fichiers / transferts|/ftp
+Fichiers / transferts|/uploads
+Fichiers / transferts|/download
+Fichiers / transferts|/downloads
+Sauvegardes / journaux|/backup
+Sauvegardes / journaux|/backups
+Sauvegardes / journaux|/logs
+Sauvegardes / journaux|/access.log
+Configuration / source|/.env
+Configuration / source|/.git/HEAD
+Configuration / source|/config
+Configuration / source|/config.json
+Configuration / source|/src
+Authentification|/login
+Authentification|/auth
+Authentification|/forgot-password
+Authentification|/reset-password
+Redirection|/redirect?url=
+Redirection|/redirect?to=
+Interne / cache|/internal
+Interne / cache|/private
+Interne / cache|/secret

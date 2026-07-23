@@ -1,0 +1,10 @@
+# Profil OWASP Juice Shop, complete la liste globale.
+Fichiers / transferts|/ftp
+Monitoring / diagnostic|/metrics
+Administration|/#/administration
+Interne / cache|/#/score-board
+Redirection|/redirect?to=
+Transaction / objet metier|/rest/basket/1
+Transaction / objet metier|/#/track-result?id=
+API / documentation|/rest/products/search?q=
+API / documentation|/api/Products

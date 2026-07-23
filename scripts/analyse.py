@@ -16,12 +16,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen
 
+from discovery import discover_surface
+
 MAX_JS_FILES = 30
 MAX_JS_SIZE = 5_000_000
 MAX_RESPONSE_SIZE = 1_000_000
 MAX_ACTIVE_TARGETS = 20
 REQUEST_TIMEOUT = 12
-USER_AGENT = "WebSecurityScanner-MVP/0.3"
+USER_AGENT = "WebSecurityScanner-MVP/0.4"
 
 SECURITY_HEADERS = {
     "content-security-policy": (
@@ -456,17 +458,8 @@ def analyse_nikto(directory: Path, findings: list[dict[str, Any]]) -> None:
             continue
 
         if "security header missing" in lowered or "header is not set" in lowered:
-            seen.add(clean)
-            add_finding(
-                findings,
-                title="Header de securite manquant signale par Nikto",
-                category="Security Misconfiguration",
-                severity="low",
-                confidence="confirmed",
-                tool="Nikto",
-                evidence=clean,
-                description="Nikto a signale une faiblesse de configuration HTTP.",
-            )
+            # Les headers sont deja controles directement afin d'eviter les doublons Nikto.
+            continue
         elif "might be interesting" in lowered:
             seen.add(clean)
             add_finding(
@@ -928,14 +921,16 @@ def write_markdown(
     findings: list[dict[str, Any]],
     endpoints: list[dict[str, Any]],
     parameters: list[dict[str, Any]],
-    unbound_parameters: list[str],
+    sensitive_routes: list[dict[str, Any]],
+    profiles: list[str],
     active_results: list[dict[str, Any]],
 ) -> None:
     lines = [
-        "# Rapport du scan MVP",
+        "# Rapport du scan MVP 0.4",
         "",
         f"**Cible :** `{target}`",
         f"**Mode :** `{mode}`",
+        f"**Profil applique :** `{', '.join(profiles) if profiles else 'global uniquement'}`",
         "",
         "## Etat des outils",
         "",
@@ -946,7 +941,7 @@ def write_markdown(
     for tool, status in read_tool_status(directory):
         lines.append(f"| {tool} | {status} |")
 
-    lines.extend(["", f"## Resultats ({len(findings)})", ""])
+    lines.extend(["", f"## Constats ({len(findings)})", ""])
     if not findings:
         lines.append("Aucune faiblesse n'a ete extraite automatiquement.")
     else:
@@ -965,12 +960,30 @@ def write_markdown(
                 ]
             )
 
-    lines.extend(["## Endpoints decouverts", ""])
-    if endpoints:
-        for endpoint in endpoints:
-            lines.append(f"- `{endpoint['method']} {endpoint['path']}` — {endpoint['source']}")
+    lines.extend(["## Routes sensibles", ""])
+    if sensitive_routes:
+        lines.extend(["| Route | Type | Categorie | Sensibilite | HTTP | Accessible | Source |", "|---|---|---|---|---|---|---|"])
+        for item in sensitive_routes:
+            status = item.get("status") if item.get("status") is not None else "-"
+            accessible = "oui" if item.get("accessible") is True else "non" if item.get("accessible") is False else "non testee"
+            lines.append(
+                f"| `{item.get('path', '')}` | {item.get('kind', '')} | {item.get('category', '')} | "
+                f"{item.get('sensitivity', '')} | {status} | {accessible} | {item.get('source', '')} |"
+            )
     else:
-        lines.append("Aucun endpoint interessant extrait automatiquement.")
+        lines.append("Aucune route sensible identifiee.")
+
+    lines.extend(["", "## Endpoints decouverts", ""])
+    if endpoints:
+        lines.extend(["| Methode | Route | Type | Sensibilite | HTTP | Source |", "|---|---|---|---|---|---|"])
+        for endpoint in endpoints:
+            status = endpoint.get("status") if endpoint.get("status") is not None else "-"
+            lines.append(
+                f"| {endpoint.get('method', 'UNKNOWN')} | `{endpoint.get('path', '')}` | {endpoint.get('kind', '')} | "
+                f"{endpoint.get('sensitivity', '')} | {status} | {endpoint.get('source', '')} |"
+            )
+    else:
+        lines.append("Aucun endpoint extrait automatiquement.")
 
     lines.extend(["", "## Parametres decouverts", ""])
     if parameters:
@@ -984,13 +997,9 @@ def write_markdown(
     else:
         lines.append("Aucun parametre associe a une route n'a ete decouvert.")
 
-    if unbound_parameters:
-        lines.extend(["", "### Noms de parametres non associes a une route", ""])
-        lines.append(", ".join(f"`{name}`" for name in unbound_parameters))
-
     lines.extend(["", "## Tests actifs", ""])
     if mode != "active":
-        lines.append("Non executes : lancer le scanner avec `--active`.")
+        lines.append("Non executes : relancer avec `--active`.")
     elif active_results:
         lines.append(f"{len(active_results)} parametre(s) GET ont ete testes avec des mutations limitees.")
     else:
@@ -1001,8 +1010,8 @@ def write_markdown(
             "",
             "## Limites",
             "",
-            "Les tests actifs sont limites aux parametres GET decouverts. Les formulaires POST, "
-            "les actions authentifiees et les failles de logique metier ne sont pas testes automatiquement.",
+            "La cartographie statique ne remplace pas un navigateur executant le JavaScript. Les routes authentifiees, "
+            "les formulaires POST et les controles d'acces complexes restent a verifier manuellement ou avec un fichier HAR.",
             "",
         ]
     )
@@ -1020,7 +1029,8 @@ def write_html(
     findings: list[dict[str, Any]],
     endpoints: list[dict[str, Any]],
     parameters: list[dict[str, Any]],
-    unbound_parameters: list[str],
+    sensitive_routes: list[dict[str, Any]],
+    profiles: list[str],
     active_results: list[dict[str, Any]],
 ) -> None:
     status_rows = "".join(
@@ -1051,10 +1061,30 @@ def write_html(
     if not finding_cards:
         finding_cards.append("<p>Aucune faiblesse extraite automatiquement.</p>")
 
+    sensitive_rows = "".join(
+        "<tr>"
+        f"<td><code>{html.escape(str(item.get('path', '')))}</code></td>"
+        f"<td>{html.escape(str(item.get('kind', '')))}</td>"
+        f"<td>{html.escape(str(item.get('category', '')))}</td>"
+        f"<td>{html.escape(str(item.get('sensitivity', '')))}</td>"
+        f"<td>{html.escape(str(item.get('status') if item.get('status') is not None else '-'))}</td>"
+        f"<td>{'oui' if item.get('accessible') is True else 'non' if item.get('accessible') is False else 'non testee'}</td>"
+        f"<td>{html.escape(str(item.get('source', '')))}</td>"
+        "</tr>"
+        for item in sensitive_routes
+    ) or '<tr><td colspan="7">Aucune route sensible identifiee.</td></tr>'
+
     endpoint_rows = "".join(
-        f"<tr><td>{html.escape(endpoint['method'])}</td><td><code>{html.escape(endpoint['path'])}</code></td><td>{html.escape(endpoint['source'])}</td></tr>"
+        "<tr>"
+        f"<td>{html.escape(str(endpoint.get('method', 'UNKNOWN')))}</td>"
+        f"<td><code>{html.escape(str(endpoint.get('path', '')))}</code></td>"
+        f"<td>{html.escape(str(endpoint.get('kind', '')))}</td>"
+        f"<td>{html.escape(str(endpoint.get('sensitivity', '')))}</td>"
+        f"<td>{html.escape(str(endpoint.get('status') if endpoint.get('status') is not None else '-'))}</td>"
+        f"<td>{html.escape(str(endpoint.get('source', '')))}</td>"
+        "</tr>"
         for endpoint in endpoints
-    ) or '<tr><td colspan="3">Aucun endpoint decouvert.</td></tr>'
+    ) or '<tr><td colspan="6">Aucun endpoint decouvert.</td></tr>'
 
     parameter_rows = "".join(
         f"<tr><td>{html.escape(parameter['method'])}</td><td><code>{html.escape(parameter['path'])}</code></td>"
@@ -1063,14 +1093,12 @@ def write_html(
         for parameter in parameters
     ) or '<tr><td colspan="6">Aucun parametre associe a une route.</td></tr>'
 
-    unbound = "".join(f"<li><code>{html.escape(name)}</code></li>" for name in unbound_parameters)
-    if not unbound:
-        unbound = "<li>Aucun nom de parametre non associe.</li>"
-
-    if mode == "active":
-        active_summary = f"{len(active_results)} parametre(s) GET testes. Les details sont dans <code>active-tests.json</code>."
-    else:
-        active_summary = "Tests non executes. Relancer le scanner avec <code>--active</code>."
+    active_summary = (
+        f"{len(active_results)} parametre(s) GET testes. Details dans <code>active-tests.json</code>."
+        if mode == "active"
+        else "Tests non executes. Relancer avec <code>--active</code>."
+    )
+    profile_text = ", ".join(profiles) if profiles else "global uniquement"
 
     document = f"""<!doctype html>
 <html lang="fr">
@@ -1081,64 +1109,37 @@ def write_html(
   <style>
     :root {{ color-scheme: light; font-family: Arial, sans-serif; }}
     body {{ margin: 0; background: #f3f5f7; color: #1d2733; }}
-    main {{ max-width: 1100px; margin: 0 auto; padding: 32px 20px 60px; }}
+    main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 60px; }}
     header, section, .finding {{ background: white; border: 1px solid #dfe5eb; border-radius: 10px; padding: 22px; margin-bottom: 18px; }}
     h1, h2, h3 {{ margin-top: 0; }}
     .target {{ overflow-wrap: anywhere; }}
     table {{ width: 100%; border-collapse: collapse; display: block; overflow-x: auto; }}
-    thead, tbody {{ width: 100%; }}
     th, td {{ text-align: left; padding: 10px; border-bottom: 1px solid #e7ebef; vertical-align: top; }}
     .finding-title {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }}
-    .badge {{ border-radius: 999px; padding: 5px 10px; font-size: 0.8rem; font-weight: bold; text-transform: uppercase; }}
-    .critical, .high {{ background: #ffd7d7; }}
-    .medium {{ background: #ffe8bd; }}
-    .low {{ background: #fff4bd; }}
-    .info {{ background: #dcecff; }}
+    .badge {{ border-radius: 999px; padding: 5px 10px; font-size: .8rem; font-weight: bold; text-transform: uppercase; }}
+    .critical, .high {{ background: #ffd7d7; }} .medium {{ background: #ffe8bd; }}
+    .low {{ background: #fff4bd; }} .info {{ background: #dcecff; }}
     dl {{ display: grid; grid-template-columns: 130px 1fr; gap: 8px 14px; margin-bottom: 0; }}
-    dt {{ font-weight: bold; }}
-    dd {{ margin: 0; min-width: 0; overflow-wrap: anywhere; }}
+    dt {{ font-weight: bold; }} dd {{ margin: 0; min-width: 0; overflow-wrap: anywhere; }}
     code {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
-    li {{ margin: 8px 0; }}
     @media (max-width: 650px) {{ dl {{ grid-template-columns: 1fr; }} .finding-title {{ display: block; }} }}
   </style>
 </head>
-<body>
-  <main>
-    <header>
-      <h1>Rapport du scan MVP 0.3</h1>
-      <p class="target"><strong>Cible :</strong> <code>{html.escape(target)}</code></p>
-      <p><strong>Mode :</strong> {html.escape(mode)}</p>
-      <p><strong>Resume :</strong> {len(findings)} constat(s), {len(endpoints)} endpoint(s), {len(parameters)} parametre(s).</p>
-    </header>
-    <section>
-      <h2>Etat des outils</h2>
-      <table><thead><tr><th>Outil</th><th>Etat</th></tr></thead><tbody>{status_rows}</tbody></table>
-    </section>
-    <section>
-      <h2>Constats</h2>
-      {''.join(finding_cards)}
-    </section>
-    <section>
-      <h2>Endpoints decouverts</h2>
-      <table><thead><tr><th>Methode</th><th>Route</th><th>Source</th></tr></thead><tbody>{endpoint_rows}</tbody></table>
-    </section>
-    <section>
-      <h2>Parametres decouverts</h2>
-      <table><thead><tr><th>Methode</th><th>Route</th><th>Parametre</th><th>Emplacement</th><th>Source</th><th>Test actif</th></tr></thead><tbody>{parameter_rows}</tbody></table>
-      <h3>Noms non associes a une route</h3>
-      <ul>{unbound}</ul>
-    </section>
-    <section>
-      <h2>Tests actifs</h2>
-      <p>{active_summary}</p>
-    </section>
-    <section>
-      <h2>Limites</h2>
-      <p>Les mutations sont limitees aux parametres GET decouverts. Les formulaires POST, les actions authentifiees et la logique metier restent a verifier manuellement.</p>
-    </section>
-  </main>
-</body>
-</html>
+<body><main>
+  <header>
+    <h1>Rapport du scan MVP 0.4</h1>
+    <p class="target"><strong>Cible :</strong> <code>{html.escape(target)}</code></p>
+    <p><strong>Mode :</strong> {html.escape(mode)} — <strong>Profil :</strong> {html.escape(profile_text)}</p>
+    <p><strong>Resume :</strong> {len(findings)} constat(s), {len(endpoints)} endpoint(s), {len(parameters)} parametre(s), {len(sensitive_routes)} route(s) sensible(s).</p>
+  </header>
+  <section><h2>Etat des outils</h2><table><thead><tr><th>Outil</th><th>Etat</th></tr></thead><tbody>{status_rows}</tbody></table></section>
+  <section><h2>Constats</h2>{''.join(finding_cards)}</section>
+  <section><h2>Routes sensibles</h2><table><thead><tr><th>Route</th><th>Type</th><th>Categorie</th><th>Sensibilite</th><th>HTTP</th><th>Accessible</th><th>Source</th></tr></thead><tbody>{sensitive_rows}</tbody></table></section>
+  <section><h2>Endpoints decouverts</h2><table><thead><tr><th>Methode</th><th>Route</th><th>Type</th><th>Sensibilite</th><th>HTTP</th><th>Source</th></tr></thead><tbody>{endpoint_rows}</tbody></table></section>
+  <section><h2>Parametres decouverts</h2><table><thead><tr><th>Methode</th><th>Route</th><th>Parametre</th><th>Emplacement</th><th>Source</th><th>Test actif</th></tr></thead><tbody>{parameter_rows}</tbody></table></section>
+  <section><h2>Tests actifs</h2><p>{active_summary}</p></section>
+  <section><h2>Limites</h2><p>La cartographie statique ne remplace pas un navigateur executant le JavaScript. Les routes authentifiees, formulaires POST et controles d'acces complexes restent a verifier manuellement ou via un fichier HAR.</p></section>
+</main></body></html>
 """
     (directory / "report.html").write_text(document, encoding="utf-8")
 
@@ -1148,6 +1149,7 @@ def main() -> None:
     parser.add_argument("--target", required=True)
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--mode", choices=["passive", "active"], default="passive")
+    parser.add_argument("--profile", default="auto", help="auto, none ou nom d'un profil dans config/profiles")
     args = parser.parse_args()
 
     findings: list[dict[str, Any]] = []
@@ -1163,39 +1165,28 @@ def main() -> None:
     analyse_nikto(args.input, findings)
     log_ok("Sorties des outils analysees.")
 
-    page = parse_page(args.input)
-    javascript_files = discover_javascript(args.target, args.input, page)
-    js_endpoints, js_parameters, unbound_parameters = analyse_javascript(
-        args.target, args.input, javascript_files, findings
+    config_dir = Path(__file__).resolve().parent.parent / "config"
+    endpoints, parameters, sensitive_routes, profiles = discover_surface(
+        target=args.target,
+        directory=args.input,
+        config_dir=config_dir,
+        profile=args.profile,
+        findings=findings,
+        add_finding=add_finding,
     )
-    html_endpoints, html_parameters = discover_html_parameters(args.target, page)
-
-    endpoints = deduplicate_records(js_endpoints + html_endpoints, ("method", "path", "source"))
-    parameters = deduplicate_records(
-        js_parameters + html_parameters,
-        ("method", "path", "name", "location"),
-    )
-    linked_parameter_names = {parameter["name"] for parameter in parameters}
-    unbound_parameters = sorted(set(unbound_parameters) - linked_parameter_names)
 
     (args.input / "endpoints.json").write_text(
         json.dumps(endpoints, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     (args.input / "parameters.json").write_text(
-        json.dumps(
-            {"parameters": parameters, "unbound_parameter_names": unbound_parameters},
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+        json.dumps({"parameters": parameters}, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    log_ok(f"Inventaire final : {len(endpoints)} endpoint(s), {len(parameters)} parametre(s).")
 
     active_results: list[dict[str, Any]] = []
     if args.mode == "active":
         active_results = run_active_tests(args.target, parameters, findings)
     else:
-        log("Mode passif : tests actifs ignores.")
+        log("Mode passif : tests de mutation ignores.")
 
     (args.input / "active-tests.json").write_text(
         json.dumps(active_results, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -1203,16 +1194,19 @@ def main() -> None:
 
     findings = deduplicate(findings)
     payload = {
+        "version": "0.4.0",
         "target": args.target,
         "mode": args.mode,
+        "profiles": profiles,
         "finding_count": len(findings),
         "endpoint_count": len(endpoints),
         "parameter_count": len(parameters),
+        "sensitive_route_count": len(sensitive_routes),
         "active_test_count": len(active_results),
         "findings": findings,
+        "sensitive_routes": sensitive_routes,
         "endpoints": endpoints,
         "parameters": parameters,
-        "unbound_parameter_names": unbound_parameters,
         "active_tests": active_results,
     }
 
@@ -1221,24 +1215,12 @@ def main() -> None:
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     write_markdown(
-        args.target,
-        args.mode,
-        args.input,
-        findings,
-        endpoints,
-        parameters,
-        unbound_parameters,
-        active_results,
+        args.target, args.mode, args.input, findings, endpoints, parameters,
+        sensitive_routes, profiles, active_results
     )
     write_html(
-        args.target,
-        args.mode,
-        args.input,
-        findings,
-        endpoints,
-        parameters,
-        unbound_parameters,
-        active_results,
+        args.target, args.mode, args.input, findings, endpoints, parameters,
+        sensitive_routes, profiles, active_results
     )
     log_ok("Rapports generes avec succes.")
 

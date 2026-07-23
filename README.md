@@ -1,19 +1,19 @@
-# 67
+# Web Security Scanner — MVP 0.4
 
-# Web Security Scanner - MVP 0.2
+Scanner local destiné à OWASP Juice Shop et aux applications explicitement autorisées.
 
-Ce projet lance plusieurs outils Kali sur une instance locale autorisee, puis analyse les resultats avec Python.
+## Nouveautés
 
-## Fonctionnalites
-
-- identification des technologies avec WhatWeb ;
-- analyse du port avec Nmap ;
-- decouverte de ressources avec Gobuster ;
-- verification de configurations avec Nikto ;
-- analyse des headers, cookies, methodes HTTP et CORS ;
-- telechargement des fichiers JavaScript du meme site ;
-- extraction de routes API et d'indices cote client ;
-- rapports JSON, Markdown et HTML autonomes.
+- exploration HTML limitée au même site ;
+- analyse contextuelle des appels `fetch`, Axios, clients HTTP et routes SPA ;
+- distinction entre routes serveur et routes navigateur `/#/...` ;
+- extraction des paramètres de requête et de chemin ;
+- lecture de `robots.txt`, `sitemap.xml` et des résultats Gobuster ;
+- vérification de chemins sensibles courants ;
+- détection des réponses génériques des SPA pour éviter les faux positifs ;
+- profil OWASP Juice Shop détecté automatiquement ;
+- suppression des faux paramètres issus du JavaScript minifié ;
+- déduplication des alertes Nikto sur les headers.
 
 ## Utilisation
 
@@ -22,27 +22,73 @@ chmod +x scan.sh
 ./scan.sh http://127.0.0.1:3000
 ```
 
-Les resultats sont crees dans :
-
-```text
-results/AAAA-MM-JJ_HH-MM-SS/
-```
-
-Fichiers principaux :
-
-- `report.html` : rapport lisible dans Firefox ;
-- `report.md` : rapport texte ;
-- `report.json` : donnees structurees ;
-- `endpoints.json` : routes extraites du JavaScript ;
-- `javascript/` : fichiers JavaScript telecharges.
-
-Pour ouvrir le dernier rapport :
+Avec les tests actifs limités :
 
 ```bash
-LATEST=$(find results -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)
-firefox "$LATEST/report.html"
+./scan.sh http://127.0.0.1:3000 --active
 ```
 
-## Securite et limites
+Forcer le profil Juice Shop :
 
-Cette version accepte uniquement `localhost`, `127.0.0.1` et `::1`. Elle effectue surtout de la reconnaissance et de l'analyse statique. Les alertes JavaScript et CORS sont des indices a confirmer, pas automatiquement des vulnerabilites.
+```bash
+./scan.sh http://127.0.0.1:3000 --active --profile juice-shop
+```
+
+Désactiver les profils spécifiques :
+
+```bash
+./scan.sh http://127.0.0.1:3000 --profile none
+```
+
+## Fonctionnement
+
+1. Bash lance WhatWeb, Nmap, Gobuster, Nikto et Curl.
+2. Python explore les pages HTML du même site.
+3. Les fichiers JavaScript sont téléchargés et analysés.
+4. Les routes trouvées sont fusionnées avec Gobuster, `robots.txt` et `sitemap.xml`.
+5. Les chemins sensibles de `config/sensitive-paths.txt` sont vérifiés par des requêtes GET limitées.
+6. Le profil Juice Shop complète la recherche avec des routes connues du laboratoire.
+7. En mode actif, seuls les paramètres GET fiables sont modifiés.
+
+## Fichiers de sortie
+
+Dans `results/AAAA-MM-JJ_HH-MM-SS/` :
+
+- `report.html` : rapport principal ;
+- `report.json` et `report.md` ;
+- `endpoints.json` : routes consolidées ;
+- `parameters.json` : paramètres liés à une route ;
+- `sensitive-routes.json` : routes sensibles réellement détectées ;
+- `route-probes.json` : ensemble des chemins testés, y compris les absents ;
+- `crawl-pages.json` : pages explorées ;
+- `active-tests.json` : résultats des mutations GET ;
+- `javascript/` : fichiers JavaScript téléchargés.
+
+## Personnalisation
+
+Ajouter des chemins globaux dans :
+
+```text
+config/sensitive-paths.txt
+```
+
+Format :
+
+```text
+Categorie|/route
+```
+
+Créer un profil dans :
+
+```text
+config/profiles/nom-du-profil.txt
+```
+
+Puis le lancer avec `--profile nom-du-profil`.
+
+Le profil Juice Shop s’appuie notamment sur les routes documentées dans :
+https://github.com/Whyiest/Juice-Shop-Write-up/tree/main
+
+## Limites
+
+Le scanner ne remplace pas un navigateur exécutant le JavaScript ni une analyse avec Burp ou ZAP. Les formulaires POST, les sessions authentifiées, les contrôles d’accès et la logique métier nécessitent encore des tests dédiés.
