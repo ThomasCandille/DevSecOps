@@ -7,17 +7,21 @@ import html
 import json
 import re
 import ssl
+import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen
 
 MAX_JS_FILES = 30
 MAX_JS_SIZE = 5_000_000
-USER_AGENT = "WebSecurityScanner-MVP/0.2"
+MAX_RESPONSE_SIZE = 1_000_000
+MAX_ACTIVE_TARGETS = 20
+REQUEST_TIMEOUT = 12
+USER_AGENT = "WebSecurityScanner-MVP/0.3"
 
 SECURITY_HEADERS = {
     "content-security-policy": (
@@ -47,6 +51,14 @@ ROUTE_PATTERNS = [
     re.compile(r"(?:url|endpoint|path)\s*:\s*[\"']([^\"']+)[\"']", re.I),
 ]
 
+PARAMETER_PATTERNS = [
+    re.compile(
+        r"(?:searchParams|queryParams|params)\.(?:get|set|append|has)\(\s*[\"']([A-Za-z0-9_.-]{1,80})[\"']",
+        re.I,
+    ),
+    re.compile(r"[?&]([A-Za-z0-9_.-]{1,80})="),
+]
+
 INTERESTING_ROUTE_MARKERS = (
     "/api/",
     "/rest/",
@@ -69,25 +81,98 @@ SENSITIVE_JS_PATTERNS = {
     ),
 }
 
+ERROR_PATTERNS = {
+    "Erreur SQL potentielle": re.compile(
+        r"(?:sql syntax|sqlite_error|sequelize|mysql|postgresql|ora-\d+|sqlstate)",
+        re.I,
+    ),
+    "Trace technique exposee": re.compile(
+        r"(?:traceback \(most recent call last\)|stack trace|at [A-Za-z0-9_$.]+\s*\([^\n]+:\d+:\d+\))",
+        re.I,
+    ),
+}
 
-class ScriptParser(HTMLParser):
+REDIRECT_PARAMETER_NAMES = {
+    "url",
+    "uri",
+    "redirect",
+    "redirect_url",
+    "redirecturl",
+    "return",
+    "return_url",
+    "returnurl",
+    "next",
+    "continue",
+    "callback",
+    "destination",
+    "to",
+}
+
+ACTIVE_MUTATIONS = {
+    "empty": "",
+    "long": "A" * 256,
+    "special": "'\"<>",
+}
+
+
+class PageParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.scripts: list[str] = []
+        self.links: list[str] = []
+        self.forms: list[dict[str, Any]] = []
+        self._current_form: dict[str, Any] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() != "script":
-            return
         attributes = dict(attrs)
-        source = attributes.get("src")
-        if source:
-            self.scripts.append(source)
+        tag = tag.lower()
+
+        if tag == "script" and attributes.get("src"):
+            self.scripts.append(attributes["src"] or "")
+        elif tag in {"a", "link"} and attributes.get("href"):
+            self.links.append(attributes["href"] or "")
+        elif tag == "form":
+            self._current_form = {
+                "action": attributes.get("action") or "",
+                "method": (attributes.get("method") or "GET").upper(),
+                "parameters": [],
+            }
+        elif tag in {"input", "select", "textarea", "button"} and self._current_form is not None:
+            name = attributes.get("name")
+            if name:
+                self._current_form["parameters"].append(
+                    {
+                        "name": name,
+                        "type": attributes.get("type") or tag,
+                        "value": attributes.get("value") or "",
+                    }
+                )
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "form" and self._current_form is not None:
+            self.forms.append(self._current_form)
+            self._current_form = None
 
 
 @dataclass
 class HeaderResponse:
     status_line: str
     headers: dict[str, list[str]]
+
+
+@dataclass
+class HttpResult:
+    url: str
+    status: int
+    headers: dict[str, str]
+    body: str
+    elapsed: float
+    error: str | None = None
+
+
+class NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
 
 
 def log(message: str) -> None:
@@ -127,6 +212,20 @@ def parse_last_header_block(content: str) -> HeaderResponse:
 def first_header(response: HeaderResponse, name: str) -> str:
     values = response.headers.get(name.lower(), [])
     return values[0] if values else ""
+
+
+def same_origin(url: str, target: str) -> bool:
+    parsed = urlparse(url)
+    target_parsed = urlparse(target)
+    return (
+        parsed.scheme,
+        parsed.hostname,
+        parsed.port or (443 if parsed.scheme == "https" else 80),
+    ) == (
+        target_parsed.scheme,
+        target_parsed.hostname,
+        target_parsed.port or (443 if target_parsed.scheme == "https" else 80),
+    )
 
 
 def add_finding(
@@ -392,7 +491,7 @@ def safe_filename(url: str, index: int) -> str:
 def fetch_text(url: str) -> str:
     request = Request(url, headers={"User-Agent": USER_AGENT})
     context = ssl._create_unverified_context() if url.startswith("https://") else None
-    with urlopen(request, timeout=15, context=context) as response:
+    with urlopen(request, timeout=REQUEST_TIMEOUT, context=context) as response:
         data = response.read(MAX_JS_SIZE + 1)
         if len(data) > MAX_JS_SIZE:
             raise ValueError("fichier JavaScript trop volumineux")
@@ -400,17 +499,20 @@ def fetch_text(url: str) -> str:
         return data.decode(charset, errors="replace")
 
 
-def discover_javascript(target: str, directory: Path) -> list[dict[str, str]]:
-    log("Recherche des fichiers JavaScript dans la page")
-    parser = ScriptParser()
+def parse_page(directory: Path) -> PageParser:
+    parser = PageParser()
     parser.feed(read_text(directory / "index.html"))
+    return parser
 
+
+def discover_javascript(target: str, directory: Path, page: PageParser) -> list[dict[str, str]]:
+    log("Recherche des fichiers JavaScript dans la page")
     target_origin = urlparse(target)
     js_directory = directory / "javascript"
     js_directory.mkdir(exist_ok=True)
     downloaded: list[dict[str, str]] = []
 
-    for index, source in enumerate(dict.fromkeys(parser.scripts), start=1):
+    for index, source in enumerate(dict.fromkeys(page.scripts), start=1):
         if index > MAX_JS_FILES:
             log_warn(f"Limite de {MAX_JS_FILES} fichiers JavaScript atteinte.")
             break
@@ -452,15 +554,37 @@ def normalize_route(value: str, target: str) -> str | None:
         return None
 
     absolute = urljoin(f"{target}/", value)
-    parsed = urlparse(absolute)
-    target_parsed = urlparse(target)
-    if parsed.hostname != target_parsed.hostname:
+    if not same_origin(absolute, target):
         return None
 
+    parsed = urlparse(absolute)
     route = parsed.path
     if parsed.query:
         route += f"?{parsed.query}"
     return route if route.startswith("/") else None
+
+
+def endpoint_from_route(route: str, source: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    parsed = urlparse(route)
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    endpoint = {
+        "method": "GET" if query_pairs else "UNKNOWN",
+        "path": parsed.path,
+        "source": source,
+    }
+    parameters = [
+        {
+            "method": "GET",
+            "path": parsed.path,
+            "name": name,
+            "location": "query",
+            "source": source,
+            "default_value": value,
+            "active_testable": True,
+        }
+        for name, value in query_pairs
+    ]
+    return endpoint, parameters
 
 
 def analyse_javascript(
@@ -468,9 +592,10 @@ def analyse_javascript(
     directory: Path,
     javascript_files: list[dict[str, str]],
     findings: list[dict[str, Any]],
-) -> list[dict[str, str]]:
-    log("Extraction des routes et indices dans le JavaScript")
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    log("Extraction des routes et parametres dans le JavaScript")
     routes: set[str] = set()
+    unbound_parameters: set[str] = set()
 
     for javascript_file in javascript_files:
         content = read_text(directory / javascript_file["file"])
@@ -478,8 +603,15 @@ def analyse_javascript(
         for pattern in ROUTE_PATTERNS:
             for match in pattern.finditer(content):
                 route = normalize_route(match.group(1), target)
-                if route and any(marker in route.lower() for marker in INTERESTING_ROUTE_MARKERS):
+                if route and (
+                    any(marker in route.lower() for marker in INTERESTING_ROUTE_MARKERS)
+                    or "?" in route
+                ):
                     routes.add(route)
+
+        for pattern in PARAMETER_PATTERNS:
+            for match in pattern.finditer(content):
+                unbound_parameters.add(match.group(1))
 
         source_maps = re.findall(r"sourceMappingURL=([^\s*]+)", content)
         for source_map in source_maps:
@@ -507,26 +639,277 @@ def analyse_javascript(
                     description="Il s'agit d'un indice a analyser, pas d'une vulnerabilite confirmee.",
                 )
 
-    endpoints = [{"method": "UNKNOWN", "path": route, "source": "javascript"} for route in sorted(routes)]
-    (directory / "endpoints.json").write_text(
-        json.dumps(endpoints, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    log_ok(f"{len(endpoints)} route(s) interessante(s) extraite(s).")
-    return endpoints
+    endpoints: list[dict[str, Any]] = []
+    parameters: list[dict[str, Any]] = []
+    for route in sorted(routes):
+        endpoint, route_parameters = endpoint_from_route(route, "javascript")
+        endpoints.append(endpoint)
+        parameters.extend(route_parameters)
+
+    log_ok(f"{len(endpoints)} route(s) et {len(parameters)} parametre(s) lies extraits du JavaScript.")
+    return endpoints, parameters, sorted(unbound_parameters)
+
+
+def discover_html_parameters(
+    target: str,
+    page: PageParser,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    log("Extraction des parametres depuis les liens et formulaires HTML")
+    endpoints: list[dict[str, Any]] = []
+    parameters: list[dict[str, Any]] = []
+
+    candidate_urls = [target]
+    candidate_urls.extend(urljoin(f"{target}/", link) for link in page.links)
+
+    for candidate in candidate_urls:
+        if not same_origin(candidate, target):
+            continue
+        parsed = urlparse(candidate)
+        pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        if not pairs:
+            continue
+        endpoints.append({"method": "GET", "path": parsed.path or "/", "source": "html-link"})
+        for name, value in pairs:
+            parameters.append(
+                {
+                    "method": "GET",
+                    "path": parsed.path or "/",
+                    "name": name,
+                    "location": "query",
+                    "source": "html-link",
+                    "default_value": value,
+                    "active_testable": True,
+                }
+            )
+
+    for form in page.forms:
+        action_url = urljoin(f"{target}/", form["action"] or urlparse(target).path or "/")
+        if not same_origin(action_url, target):
+            continue
+        parsed = urlparse(action_url)
+        method = form["method"]
+        endpoints.append({"method": method, "path": parsed.path or "/", "source": "html-form"})
+        for parameter in form["parameters"]:
+            parameters.append(
+                {
+                    "method": method,
+                    "path": parsed.path or "/",
+                    "name": parameter["name"],
+                    "location": "query" if method == "GET" else "body",
+                    "source": "html-form",
+                    "default_value": parameter["value"],
+                    "input_type": parameter["type"],
+                    "active_testable": method == "GET",
+                }
+            )
+
+    log_ok(f"{len(page.forms)} formulaire(s) HTML et {len(parameters)} parametre(s) trouves.")
+    return endpoints, parameters
+
+
+def deduplicate_records(records: list[dict[str, Any]], keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for record in records:
+        fingerprint = tuple(record.get(key) for key in keys)
+        if fingerprint not in seen:
+            seen.add(fingerprint)
+            unique.append(record)
+    return unique
+
+
+def request_get(url: str) -> HttpResult:
+    request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+    context = ssl._create_unverified_context() if url.startswith("https://") else None
+    handlers: list[Any] = [NoRedirectHandler()]
+    if context is not None:
+        handlers.append(HTTPSHandler(context=context))
+    opener = build_opener(*handlers)
+    started = time.monotonic()
+
+    try:
+        response = opener.open(request, timeout=REQUEST_TIMEOUT)
+        body_bytes = response.read(MAX_RESPONSE_SIZE + 1)
+        if len(body_bytes) > MAX_RESPONSE_SIZE:
+            body_bytes = body_bytes[:MAX_RESPONSE_SIZE]
+        charset = response.headers.get_content_charset() or "utf-8"
+        return HttpResult(
+            url=url,
+            status=response.getcode(),
+            headers={key.lower(): value for key, value in response.headers.items()},
+            body=body_bytes.decode(charset, errors="replace"),
+            elapsed=round(time.monotonic() - started, 3),
+        )
+    except HTTPError as error:
+        body_bytes = error.read(MAX_RESPONSE_SIZE + 1)
+        charset = error.headers.get_content_charset() or "utf-8"
+        return HttpResult(
+            url=url,
+            status=error.code,
+            headers={key.lower(): value for key, value in error.headers.items()},
+            body=body_bytes[:MAX_RESPONSE_SIZE].decode(charset, errors="replace"),
+            elapsed=round(time.monotonic() - started, 3),
+        )
+    except (URLError, TimeoutError, OSError) as error:
+        return HttpResult(
+            url=url,
+            status=0,
+            headers={},
+            body="",
+            elapsed=round(time.monotonic() - started, 3),
+            error=str(error),
+        )
+
+
+def build_test_url(target: str, parameter: dict[str, Any], value: str) -> str:
+    base = urljoin(f"{target}/", parameter["path"].lstrip("/"))
+    parsed = urlparse(base)
+    query = [(parameter["name"], value)]
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def body_signature(body: str) -> str:
+    normalized = re.sub(r"\s+", " ", body).strip()
+    return normalized[:180]
+
+
+def run_active_tests(
+    target: str,
+    parameters: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    testable = [parameter for parameter in parameters if parameter.get("active_testable")]
+    testable = testable[:MAX_ACTIVE_TARGETS]
+    results: list[dict[str, Any]] = []
+
+    log(f"Preparation des tests actifs sur {len(testable)} parametre(s) GET")
+    if not testable:
+        log_warn("Aucun parametre GET testable n'a ete decouvert.")
+        return results
+
+    for index, parameter in enumerate(testable, start=1):
+        label = f"{parameter['path']}?{parameter['name']}"
+        log(f"Test actif {index}/{len(testable)} : {label}")
+        baseline_value = parameter.get("default_value") or "scanner"
+        baseline_url = build_test_url(target, parameter, baseline_value)
+        baseline = request_get(baseline_url)
+
+        parameter_result = {
+            "method": "GET",
+            "path": parameter["path"],
+            "parameter": parameter["name"],
+            "baseline": {
+                "url": baseline.url,
+                "status": baseline.status,
+                "length": len(baseline.body),
+                "elapsed": baseline.elapsed,
+                "error": baseline.error,
+            },
+            "mutations": [],
+        }
+
+        if baseline.error:
+            log_warn(f"Baseline inaccessible pour {label}: {baseline.error}")
+            results.append(parameter_result)
+            continue
+
+        mutations = dict(ACTIVE_MUTATIONS)
+        reflection_marker = f"WSS_REFLECT_{index:03d}"
+        mutations["reflection"] = reflection_marker
+        if parameter["name"].lower() in REDIRECT_PARAMETER_NAMES:
+            mutations["external_redirect"] = "https://scanner.invalid/"
+
+        for mutation_name, mutation_value in mutations.items():
+            test_url = build_test_url(target, parameter, mutation_value)
+            response = request_get(test_url)
+            mutation_result = {
+                "name": mutation_name,
+                "url": test_url,
+                "status": response.status,
+                "length": len(response.body),
+                "elapsed": response.elapsed,
+                "error": response.error,
+                "status_changed": response.status != baseline.status,
+                "length_delta": len(response.body) - len(baseline.body),
+                "body_preview": body_signature(response.body),
+            }
+            parameter_result["mutations"].append(mutation_result)
+
+            if response.error:
+                continue
+
+            if response.status >= 500 and baseline.status < 500:
+                add_finding(
+                    findings,
+                    title="Erreur serveur provoquee par une entree modifiee",
+                    category="Improper Input Validation",
+                    severity="medium",
+                    confidence="probable",
+                    tool="Active parameter tests",
+                    evidence=f"GET {parameter['path']} ; parametre {parameter['name']} ; mutation {mutation_name} ; HTTP {response.status}",
+                    description="Une valeur inhabituelle provoque une erreur serveur alors que la requete de reference ne le fait pas.",
+                )
+
+            for title, pattern in ERROR_PATTERNS.items():
+                if pattern.search(response.body) and not pattern.search(baseline.body):
+                    add_finding(
+                        findings,
+                        title=title,
+                        category="Injection" if "SQL" in title else "Information Disclosure",
+                        severity="medium",
+                        confidence="probable",
+                        tool="Active parameter tests",
+                        evidence=f"GET {parameter['path']} ; parametre {parameter['name']} ; mutation {mutation_name}",
+                        description="La reponse modifiee contient un motif d'erreur technique absent de la reponse de reference.",
+                    )
+
+            if mutation_name == "reflection" and reflection_marker in response.body:
+                add_finding(
+                    findings,
+                    title="Entree utilisateur refletee dans la reponse",
+                    category="XSS / Input Handling",
+                    severity="low",
+                    confidence="possible",
+                    tool="Active parameter tests",
+                    evidence=f"Le marqueur {reflection_marker} est retourne par {parameter['path']} via {parameter['name']}.",
+                    description="La reflexion seule ne confirme pas une XSS. Le contexte HTML et l'encodage doivent etre verifies.",
+                )
+
+            if mutation_name == "external_redirect" and response.status in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location", "")
+                if location and urlparse(urljoin(test_url, location)).hostname == "scanner.invalid":
+                    add_finding(
+                        findings,
+                        title="Redirection externe potentiellement non validee",
+                        category="Unvalidated Redirects",
+                        severity="medium",
+                        confidence="probable",
+                        tool="Active parameter tests",
+                        evidence=f"{parameter['name']} provoque HTTP {response.status} vers {location}",
+                        description="Le parametre semble permettre une redirection vers un domaine externe.",
+                    )
+
+            if response.elapsed > baseline.elapsed + 3 and response.elapsed > 4:
+                add_finding(
+                    findings,
+                    title="Temps de reponse anormal apres mutation",
+                    category="Improper Input Validation",
+                    severity="info",
+                    confidence="possible",
+                    tool="Active parameter tests",
+                    evidence=f"{label} ; baseline {baseline.elapsed}s ; mutation {mutation_name} {response.elapsed}s",
+                    description="Cette variation peut signaler un traitement particulier, mais doit etre reproduite manuellement.",
+                )
+
+        results.append(parameter_result)
+        log_ok(f"Tests termines pour {label}")
+
+    log_ok(f"Tests actifs termines sur {len(results)} parametre(s).")
+    return results
 
 
 def deduplicate(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    unique: list[dict[str, Any]] = []
-    fingerprints: set[tuple[str, str]] = set()
-
-    for finding in findings:
-        fingerprint = (finding["title"], finding["evidence"].lower())
-        if fingerprint not in fingerprints:
-            fingerprints.add(fingerprint)
-            unique.append(finding)
-
-    return unique
+    return deduplicate_records(findings, ("title", "evidence"))
 
 
 def read_tool_status(directory: Path) -> list[tuple[str, str]]:
@@ -540,14 +923,19 @@ def read_tool_status(directory: Path) -> list[tuple[str, str]]:
 
 def write_markdown(
     target: str,
+    mode: str,
     directory: Path,
     findings: list[dict[str, Any]],
-    endpoints: list[dict[str, str]],
+    endpoints: list[dict[str, Any]],
+    parameters: list[dict[str, Any]],
+    unbound_parameters: list[str],
+    active_results: list[dict[str, Any]],
 ) -> None:
     lines = [
         "# Rapport du scan MVP",
         "",
         f"**Cible :** `{target}`",
+        f"**Mode :** `{mode}`",
         "",
         "## Etat des outils",
         "",
@@ -559,7 +947,6 @@ def write_markdown(
         lines.append(f"| {tool} | {status} |")
 
     lines.extend(["", f"## Resultats ({len(findings)})", ""])
-
     if not findings:
         lines.append("Aucune faiblesse n'a ete extraite automatiquement.")
     else:
@@ -578,24 +965,47 @@ def write_markdown(
                 ]
             )
 
-    lines.extend(["## Routes extraites du JavaScript", ""])
+    lines.extend(["## Endpoints decouverts", ""])
     if endpoints:
         for endpoint in endpoints:
-            lines.append(f"- `{endpoint['path']}`")
+            lines.append(f"- `{endpoint['method']} {endpoint['path']}` — {endpoint['source']}")
     else:
-        lines.append("Aucune route interessante extraite automatiquement.")
+        lines.append("Aucun endpoint interessant extrait automatiquement.")
+
+    lines.extend(["", "## Parametres decouverts", ""])
+    if parameters:
+        lines.extend(["| Methode | Route | Parametre | Emplacement | Source | Test actif |", "|---|---|---|---|---|---|"])
+        for parameter in parameters:
+            lines.append(
+                f"| {parameter['method']} | `{parameter['path']}` | `{parameter['name']}` | "
+                f"{parameter['location']} | {parameter['source']} | "
+                f"{'oui' if parameter.get('active_testable') else 'non'} |"
+            )
+    else:
+        lines.append("Aucun parametre associe a une route n'a ete decouvert.")
+
+    if unbound_parameters:
+        lines.extend(["", "### Noms de parametres non associes a une route", ""])
+        lines.append(", ".join(f"`{name}`" for name in unbound_parameters))
+
+    lines.extend(["", "## Tests actifs", ""])
+    if mode != "active":
+        lines.append("Non executes : lancer le scanner avec `--active`.")
+    elif active_results:
+        lines.append(f"{len(active_results)} parametre(s) GET ont ete testes avec des mutations limitees.")
+    else:
+        lines.append("Aucun parametre GET testable n'a ete trouve.")
 
     lines.extend(
         [
             "",
             "## Limites",
             "",
-            "Cette version couvre la reconnaissance, les configurations HTTP, les cookies "
-            "et l'analyse statique du JavaScript. Les routes et motifs detectes restent a verifier.",
+            "Les tests actifs sont limites aux parametres GET decouverts. Les formulaires POST, "
+            "les actions authentifiees et les failles de logique metier ne sont pas testes automatiquement.",
             "",
         ]
     )
-
     (directory / "report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -605,14 +1015,18 @@ def severity_class(severity: str) -> str:
 
 def write_html(
     target: str,
+    mode: str,
     directory: Path,
     findings: list[dict[str, Any]],
-    endpoints: list[dict[str, str]],
+    endpoints: list[dict[str, Any]],
+    parameters: list[dict[str, Any]],
+    unbound_parameters: list[str],
+    active_results: list[dict[str, Any]],
 ) -> None:
     status_rows = "".join(
         f"<tr><td>{html.escape(tool)}</td><td>{html.escape(status)}</td></tr>"
         for tool, status in read_tool_status(directory)
-    )
+    ) or '<tr><td colspan="2">Aucun statut disponible</td></tr>'
 
     finding_cards = []
     for index, finding in enumerate(findings, start=1):
@@ -634,13 +1048,29 @@ def write_html(
             </article>
             """
         )
-
     if not finding_cards:
         finding_cards.append("<p>Aucune faiblesse extraite automatiquement.</p>")
 
-    endpoint_items = "".join(
-        f"<li><code>{html.escape(endpoint['path'])}</code></li>" for endpoint in endpoints
-    ) or "<li>Aucune route interessante extraite automatiquement.</li>"
+    endpoint_rows = "".join(
+        f"<tr><td>{html.escape(endpoint['method'])}</td><td><code>{html.escape(endpoint['path'])}</code></td><td>{html.escape(endpoint['source'])}</td></tr>"
+        for endpoint in endpoints
+    ) or '<tr><td colspan="3">Aucun endpoint decouvert.</td></tr>'
+
+    parameter_rows = "".join(
+        f"<tr><td>{html.escape(parameter['method'])}</td><td><code>{html.escape(parameter['path'])}</code></td>"
+        f"<td><code>{html.escape(parameter['name'])}</code></td><td>{html.escape(parameter['location'])}</td>"
+        f"<td>{html.escape(parameter['source'])}</td><td>{'oui' if parameter.get('active_testable') else 'non'}</td></tr>"
+        for parameter in parameters
+    ) or '<tr><td colspan="6">Aucun parametre associe a une route.</td></tr>'
+
+    unbound = "".join(f"<li><code>{html.escape(name)}</code></li>" for name in unbound_parameters)
+    if not unbound:
+        unbound = "<li>Aucun nom de parametre non associe.</li>"
+
+    if mode == "active":
+        active_summary = f"{len(active_results)} parametre(s) GET testes. Les details sont dans <code>active-tests.json</code>."
+    else:
+        active_summary = "Tests non executes. Relancer le scanner avec <code>--active</code>."
 
     document = f"""<!doctype html>
 <html lang="fr">
@@ -651,12 +1081,13 @@ def write_html(
   <style>
     :root {{ color-scheme: light; font-family: Arial, sans-serif; }}
     body {{ margin: 0; background: #f3f5f7; color: #1d2733; }}
-    main {{ max-width: 1050px; margin: 0 auto; padding: 32px 20px 60px; }}
+    main {{ max-width: 1100px; margin: 0 auto; padding: 32px 20px 60px; }}
     header, section, .finding {{ background: white; border: 1px solid #dfe5eb; border-radius: 10px; padding: 22px; margin-bottom: 18px; }}
     h1, h2, h3 {{ margin-top: 0; }}
     .target {{ overflow-wrap: anywhere; }}
-    table {{ width: 100%; border-collapse: collapse; }}
-    th, td {{ text-align: left; padding: 10px; border-bottom: 1px solid #e7ebef; }}
+    table {{ width: 100%; border-collapse: collapse; display: block; overflow-x: auto; }}
+    thead, tbody {{ width: 100%; }}
+    th, td {{ text-align: left; padding: 10px; border-bottom: 1px solid #e7ebef; vertical-align: top; }}
     .finding-title {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }}
     .badge {{ border-radius: 999px; padding: 5px 10px; font-size: 0.8rem; font-weight: bold; text-transform: uppercase; }}
     .critical, .high {{ background: #ffd7d7; }}
@@ -674,9 +1105,10 @@ def write_html(
 <body>
   <main>
     <header>
-      <h1>Rapport du scan MVP</h1>
+      <h1>Rapport du scan MVP 0.3</h1>
       <p class="target"><strong>Cible :</strong> <code>{html.escape(target)}</code></p>
-      <p><strong>Resultats :</strong> {len(findings)} constat(s), {len(endpoints)} route(s) extraite(s).</p>
+      <p><strong>Mode :</strong> {html.escape(mode)}</p>
+      <p><strong>Resume :</strong> {len(findings)} constat(s), {len(endpoints)} endpoint(s), {len(parameters)} parametre(s).</p>
     </header>
     <section>
       <h2>Etat des outils</h2>
@@ -687,12 +1119,22 @@ def write_html(
       {''.join(finding_cards)}
     </section>
     <section>
-      <h2>Routes extraites du JavaScript</h2>
-      <ul>{endpoint_items}</ul>
+      <h2>Endpoints decouverts</h2>
+      <table><thead><tr><th>Methode</th><th>Route</th><th>Source</th></tr></thead><tbody>{endpoint_rows}</tbody></table>
+    </section>
+    <section>
+      <h2>Parametres decouverts</h2>
+      <table><thead><tr><th>Methode</th><th>Route</th><th>Parametre</th><th>Emplacement</th><th>Source</th><th>Test actif</th></tr></thead><tbody>{parameter_rows}</tbody></table>
+      <h3>Noms non associes a une route</h3>
+      <ul>{unbound}</ul>
+    </section>
+    <section>
+      <h2>Tests actifs</h2>
+      <p>{active_summary}</p>
     </section>
     <section>
       <h2>Limites</h2>
-      <p>Cette version realise de la reconnaissance, analyse les configurations HTTP, les cookies et le JavaScript. Les indices trouves doivent etre confirmes manuellement.</p>
+      <p>Les mutations sont limitees aux parametres GET decouverts. Les formulaires POST, les actions authentifiees et la logique metier restent a verifier manuellement.</p>
     </section>
   </main>
 </body>
@@ -705,6 +1147,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Analyse les sorties du scanner MVP.")
     parser.add_argument("--target", required=True)
     parser.add_argument("--input", required=True, type=Path)
+    parser.add_argument("--mode", choices=["passive", "active"], default="passive")
     args = parser.parse_args()
 
     findings: list[dict[str, Any]] = []
@@ -720,25 +1163,83 @@ def main() -> None:
     analyse_nikto(args.input, findings)
     log_ok("Sorties des outils analysees.")
 
-    javascript_files = discover_javascript(args.target, args.input)
-    endpoints = analyse_javascript(args.target, args.input, javascript_files, findings)
-    findings = deduplicate(findings)
+    page = parse_page(args.input)
+    javascript_files = discover_javascript(args.target, args.input, page)
+    js_endpoints, js_parameters, unbound_parameters = analyse_javascript(
+        args.target, args.input, javascript_files, findings
+    )
+    html_endpoints, html_parameters = discover_html_parameters(args.target, page)
 
+    endpoints = deduplicate_records(js_endpoints + html_endpoints, ("method", "path", "source"))
+    parameters = deduplicate_records(
+        js_parameters + html_parameters,
+        ("method", "path", "name", "location"),
+    )
+    linked_parameter_names = {parameter["name"] for parameter in parameters}
+    unbound_parameters = sorted(set(unbound_parameters) - linked_parameter_names)
+
+    (args.input / "endpoints.json").write_text(
+        json.dumps(endpoints, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    (args.input / "parameters.json").write_text(
+        json.dumps(
+            {"parameters": parameters, "unbound_parameter_names": unbound_parameters},
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    log_ok(f"Inventaire final : {len(endpoints)} endpoint(s), {len(parameters)} parametre(s).")
+
+    active_results: list[dict[str, Any]] = []
+    if args.mode == "active":
+        active_results = run_active_tests(args.target, parameters, findings)
+    else:
+        log("Mode passif : tests actifs ignores.")
+
+    (args.input / "active-tests.json").write_text(
+        json.dumps(active_results, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    findings = deduplicate(findings)
     payload = {
         "target": args.target,
+        "mode": args.mode,
         "finding_count": len(findings),
         "endpoint_count": len(endpoints),
+        "parameter_count": len(parameters),
+        "active_test_count": len(active_results),
         "findings": findings,
         "endpoints": endpoints,
+        "parameters": parameters,
+        "unbound_parameter_names": unbound_parameters,
+        "active_tests": active_results,
     }
 
     log("Generation des rapports JSON, Markdown et HTML")
     (args.input / "report.json").write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    write_markdown(args.target, args.input, findings, endpoints)
-    write_html(args.target, args.input, findings, endpoints)
+    write_markdown(
+        args.target,
+        args.mode,
+        args.input,
+        findings,
+        endpoints,
+        parameters,
+        unbound_parameters,
+        active_results,
+    )
+    write_html(
+        args.target,
+        args.mode,
+        args.input,
+        findings,
+        endpoints,
+        parameters,
+        unbound_parameters,
+        active_results,
+    )
     log_ok("Rapports generes avec succes.")
 
 

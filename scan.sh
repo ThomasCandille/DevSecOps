@@ -2,15 +2,20 @@
 
 set -Eeuo pipefail
 
-VERSION="0.2.0"
-TOTAL_STEPS=7
+VERSION="0.3.0"
+TOTAL_STEPS=8
 
 usage() {
   cat <<'TXT'
 Usage :
   ./scan.sh http://127.0.0.1:3000
+  ./scan.sh http://127.0.0.1:3000 --active
 
-Ce scanner accepte uniquement localhost, 127.0.0.1 ou ::1.
+Modes :
+  --passive  Reconnaissance et analyse sans mutation de paramètres (défaut).
+  --active   Ajoute des tests limités sur les paramètres GET découverts.
+
+Cette version accepte uniquement localhost, 127.0.0.1 ou ::1.
 TXT
 }
 
@@ -32,15 +37,28 @@ log_warn() {
   printf '      [!] %s\n' "$*"
 }
 
-if [[ $# -ne 1 ]]; then
+if [[ $# -lt 1 || $# -gt 2 ]]; then
   usage
   exit 1
 fi
 
 TARGET="${1%/}"
+MODE="passive"
+
+if [[ $# -eq 2 ]]; then
+  case "$2" in
+    --active) MODE="active" ;;
+    --passive) MODE="passive" ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-log_step 1 "Validation de la cible"
+log_step 1 "Validation de la cible et du mode"
 
 readarray -t TARGET_INFO < <(
   python3 - "$TARGET" <<'PY'
@@ -80,6 +98,7 @@ printf 'tool\tstatus\n' > "$STATUS_FILE"
 log_ok "Cible autorisee : $TARGET"
 log_info "Hote : $HOST"
 log_info "Port : $PORT"
+log_info "Mode : $MODE"
 log_info "Resultats : $OUTPUT_DIR"
 
 require_command() {
@@ -198,14 +217,27 @@ curl -ksS --max-time 15 \
   -o "$OUTPUT_DIR/cors-body.txt" \
   "$TARGET" || true
 
-log_step 7 "Analyse et generation des rapports"
+log_step 7 "Decouverte des routes et parametres"
+log_info "Analyse du HTML et du JavaScript"
+log_info "Les formulaires POST sont inventories mais ne sont pas testes automatiquement"
+
+log_step 8 "Analyse, tests actifs et generation des rapports"
+if [[ "$MODE" == "active" ]]; then
+  log_warn "Mode actif : mutations limitees sur les parametres GET decouverts."
+else
+  log_info "Mode passif : aucun parametre ne sera modifie."
+fi
+
 python3 "$SCRIPT_DIR/scripts/analyse.py" \
   --target "$TARGET" \
-  --input "$OUTPUT_DIR"
+  --input "$OUTPUT_DIR" \
+  --mode "$MODE"
 
 printf '\n============================================================\n'
 printf ' Scan termine avec Web Security Scanner MVP %s\n' "$VERSION"
+printf ' Mode         : %s\n' "$MODE"
 printf ' Rapport HTML : %s/report.html\n' "$OUTPUT_DIR"
 printf ' Rapport MD   : %s/report.md\n' "$OUTPUT_DIR"
-printf ' Routes API   : %s/endpoints.json\n' "$OUTPUT_DIR"
+printf ' Parametres   : %s/parameters.json\n' "$OUTPUT_DIR"
+printf ' Tests actifs : %s/active-tests.json\n' "$OUTPUT_DIR"
 printf '============================================================\n'
