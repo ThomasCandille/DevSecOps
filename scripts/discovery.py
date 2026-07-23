@@ -15,7 +15,14 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urljoin, urlparse
+from urllib.parse import (
+    parse_qsl,
+    quote,
+    urljoin,
+    urlparse,
+    urlsplit,
+    urlunsplit,
+)
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 USER_AGENT = "WebSecurityScanner-MVP/0.4"
@@ -201,12 +208,51 @@ def build_opener_for(url: str) -> Any:
         handlers.append(HTTPSHandler(context=ssl._create_unverified_context()))
     return build_opener(*handlers)
 
+def encode_url_for_request(url: str) -> str:
+    """
+    Convertit une URL Unicode en URL HTTP correctement encodée.
+
+    Exemple :
+    /préférences -> /pr%C3%A9f%C3%A9rences
+    ?q=café      -> ?q=caf%C3%A9
+    """
+    parts = urlsplit(url)
+
+    encoded_path = quote(
+        parts.path,
+        safe="/%:@!$&'()*+,;=-._~",
+    )
+
+    encoded_query = quote(
+        parts.query,
+        safe="=&%/:?@!$'()*+,;[]-._~",
+    )
+
+    return urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            encoded_path,
+            encoded_query,
+            "",  # Le fragment #... n'est pas envoyé au serveur.
+        )
+    )
 
 def request_url(url: str, *, max_size: int = MAX_BODY_SIZE) -> HttpResult:
-    request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
     started = time.monotonic()
-    opener = build_opener_for(url)
+
     try:
+        encoded_url = encode_url_for_request(url)
+
+        request = Request(
+            encoded_url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "*/*",
+            },
+        )
+
+        opener = build_opener_for(encoded_url)
         response = opener.open(request, timeout=REQUEST_TIMEOUT)
         body_bytes = response.read(max_size + 1)[:max_size]
         charset = response.headers.get_content_charset() or "utf-8"
@@ -229,7 +275,13 @@ def request_url(url: str, *, max_size: int = MAX_BODY_SIZE) -> HttpResult:
             body=body_bytes.decode(charset, errors="replace"),
             elapsed=round(time.monotonic() - started, 3),
         )
-    except (URLError, TimeoutError, OSError) as error:
+    except (
+    URLError,
+    TimeoutError,
+    OSError,
+    UnicodeError,
+    ValueError,
+) as error:
         return HttpResult(
             requested_url=url,
             final_url=url,
