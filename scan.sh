@@ -2,8 +2,8 @@
 
 set -Eeuo pipefail
 
-VERSION="0.4.0"
-TOTAL_STEPS=8
+VERSION="0.5.0"
+TOTAL_STEPS=9
 
 usage() {
   cat <<'TXT'
@@ -193,11 +193,25 @@ python3 "$SCRIPT_DIR/scripts/analyse.py" \
   --mode "$MODE" \
   --profile "$PROFILE"
 
+log_step 9 "Nettoyage et consolidation du rapport"
+
+log_info "Filtrage des faux endpoints et deduplication des constats"
+
+if python3 "$SCRIPT_DIR/scripts/report_clean.py" \
+  --input "$OUTPUT_DIR"; then
+    log_ok "Rapport consolide genere."
+else
+    log_warn "La generation du rapport consolide a echoue."
+fi
+
 printf '\n============================================================\n'
 printf ' Scan termine avec Web Security Scanner MVP %s\n' "$VERSION"
 printf ' Mode              : %s\n' "$MODE"
 printf ' Profil            : %s\n' "$PROFILE"
-printf ' Rapport HTML      : %s/report.html\n' "$OUTPUT_DIR"
+printf ' Rapport principal : %s/report-clean.html\n' "$OUTPUT_DIR"
+printf ' Rapport brut      : %s/report.html\n' "$OUTPUT_DIR"
+printf ' Rapport Markdown  : %s/report-clean.md\n' "$OUTPUT_DIR"
+printf ' Rapport JSON      : %s/report-clean.json\n' "$OUTPUT_DIR"
 printf ' Routes sensibles  : %s/sensitive-routes.json\n' "$OUTPUT_DIR"
 printf ' Endpoints         : %s/endpoints.json\n' "$OUTPUT_DIR"
 printf ' Parametres        : %s/parameters.json\n' "$OUTPUT_DIR"

@@ -717,15 +717,6 @@ def extract_routes_from_js(
         for match in pattern.finditer(content):
             add_candidate(match.group("value"), "UNKNOWN", "javascript-router", True, match.end("value"))
 
-    for match in QUOTED_STRING_PATTERN.finditer(content):
-        value = decode_js_literal(match.group(0))
-        if not looks_like_route(value, route_context=False):
-            continue
-        category, _ = classify_route(value)
-        if category == "Application" and not value.startswith(("/", "./", "../", "#/", "http://", "https://")):
-            continue
-        add_candidate(match.group(0), "UNKNOWN", "javascript-string", False, match.end())
-
     for source_map in SOURCE_MAP_PATTERN.findall(content):
         add_finding(
             findings,
