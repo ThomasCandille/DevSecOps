@@ -2,13 +2,34 @@
 
 set -Eeuo pipefail
 
+VERSION="0.2.0"
+TOTAL_STEPS=7
+
 usage() {
   cat <<'TXT'
-Usage:
+Usage :
   ./scan.sh http://127.0.0.1:3000
 
-Ce MVP accepte uniquement localhost, 127.0.0.1 ou ::1.
+Ce scanner accepte uniquement localhost, 127.0.0.1 ou ::1.
 TXT
+}
+
+log_step() {
+  local number="$1"
+  shift
+  printf '\n[%s/%s] %s\n' "$number" "$TOTAL_STEPS" "$*"
+}
+
+log_info() {
+  printf '      -> %s\n' "$*"
+}
+
+log_ok() {
+  printf '      [OK] %s\n' "$*"
+}
+
+log_warn() {
+  printf '      [!] %s\n' "$*"
 }
 
 if [[ $# -ne 1 ]]; then
@@ -18,6 +39,8 @@ fi
 
 TARGET="${1%/}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+log_step 1 "Validation de la cible"
 
 readarray -t TARGET_INFO < <(
   python3 - "$TARGET" <<'PY'
@@ -42,7 +65,7 @@ PORT="${TARGET_INFO[1]}"
 case "$HOST" in
   localhost|127.0.0.1|::1) ;;
   *)
-    echo "Erreur : ce MVP limite les scans aux cibles locales."
+    echo "Erreur : cette version limite les scans aux cibles locales."
     exit 1
     ;;
 esac
@@ -53,6 +76,11 @@ mkdir -p "$OUTPUT_DIR"
 
 STATUS_FILE="$OUTPUT_DIR/tool-status.tsv"
 printf 'tool\tstatus\n' > "$STATUS_FILE"
+
+log_ok "Cible autorisee : $TARGET"
+log_info "Hote : $HOST"
+log_info "Port : $PORT"
+log_info "Resultats : $OUTPUT_DIR"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -68,32 +96,31 @@ run_tool() {
   local name="$1"
   shift
 
-  echo "[$name] lancement"
-  if command -v "$1" >/dev/null 2>&1; then
-    if "$@"; then
-      printf '%s\t%s\n' "$name" "success" >> "$STATUS_FILE"
-    else
-      printf '%s\t%s\n' "$name" "failed" >> "$STATUS_FILE"
-      echo "[$name] termine avec une erreur. Consulte le fichier de sortie."
-    fi
-  else
+  if ! command -v "$1" >/dev/null 2>&1; then
     printf '%s\t%s\n' "$name" "missing" >> "$STATUS_FILE"
-    echo "[$name] non installe, test ignore."
+    log_warn "$name non installe : test ignore."
+    return 0
+  fi
+
+  log_info "Lancement de $name"
+  if "$@"; then
+    printf '%s\t%s\n' "$name" "success" >> "$STATUS_FILE"
+    log_ok "$name termine."
+  else
+    printf '%s\t%s\n' "$name" "failed" >> "$STATUS_FILE"
+    log_warn "$name a retourne une erreur. Le reste du scan continue."
   fi
 }
 
-echo "Cible       : $TARGET"
-echo "Hote        : $HOST"
-echo "Port        : $PORT"
-echo "Resultats   : $OUTPUT_DIR"
-echo
-
+log_step 2 "Identification des technologies"
 run_tool "whatweb" whatweb -a 1 "$TARGET" \
   --log-verbose="$OUTPUT_DIR/whatweb.txt"
 
+log_step 3 "Analyse du port et du service"
 run_tool "nmap" nmap -Pn -sV -p "$PORT" "$HOST" \
   -oN "$OUTPUT_DIR/nmap.txt"
 
+log_step 4 "Decouverte de ressources"
 WORDLIST=""
 for candidate in \
   /usr/share/wordlists/dirb/common.txt \
@@ -106,7 +133,8 @@ done
 
 if [[ -n "$WORDLIST" ]] && command -v gobuster >/dev/null 2>&1; then
   RANDOM_PATH="route-inexistante-$RANDOM-$RANDOM"
-  EXCLUDED_LENGTH="$(curl -ksS "$TARGET/$RANDOM_PATH" | wc -c | tr -d ' ')"
+  EXCLUDED_LENGTH="$(curl -ksS --max-time 10 "$TARGET/$RANDOM_PATH" | wc -c | tr -d ' ')"
+  log_info "Taille d'une reponse inexistante : $EXCLUDED_LENGTH octets"
 
   run_tool "gobuster" gobuster dir \
     -u "$TARGET" \
@@ -117,11 +145,12 @@ if [[ -n "$WORDLIST" ]] && command -v gobuster >/dev/null 2>&1; then
     -o "$OUTPUT_DIR/gobuster.txt"
 else
   printf '%s\t%s\n' "gobuster" "missing" >> "$STATUS_FILE"
-  echo "[gobuster] outil ou wordlist introuvable, test ignore."
+  log_warn "Gobuster ou sa wordlist est introuvable : test ignore."
 fi
 
+log_step 5 "Recherche de mauvaises configurations"
 if command -v nikto >/dev/null 2>&1; then
-  echo "[nikto] lancement"
+  log_info "Lancement de Nikto"
   if nikto \
     -h "$TARGET" \
     -nocheck \
@@ -131,30 +160,52 @@ if command -v nikto >/dev/null 2>&1; then
     -output "$OUTPUT_DIR/nikto.txt" \
     > "$OUTPUT_DIR/nikto-console.txt" 2>&1; then
     printf '%s\t%s\n' "nikto" "success" >> "$STATUS_FILE"
+    log_ok "Nikto termine."
   else
     printf '%s\t%s\n' "nikto" "failed" >> "$STATUS_FILE"
-    echo "[nikto] termine avec une erreur."
+    log_warn "Nikto a retourne une erreur. Consulte nikto-console.txt."
   fi
 else
   printf '%s\t%s\n' "nikto" "missing" >> "$STATUS_FILE"
-  echo "[nikto] non installe, test ignore."
+  log_warn "Nikto non installe : test ignore."
 fi
 
-echo "[http] collecte des en-tetes et de la page"
+log_step 6 "Collecte HTTP"
+log_info "Recuperation de la page, des headers et des cookies"
 if curl -ksS \
   --max-time 15 \
   -D "$OUTPUT_DIR/headers.txt" \
+  -c "$OUTPUT_DIR/cookies.txt" \
   -o "$OUTPUT_DIR/index.html" \
   "$TARGET"; then
   printf '%s\t%s\n' "curl" "success" >> "$STATUS_FILE"
+  log_ok "Page principale recuperee."
 else
   printf '%s\t%s\n' "curl" "failed" >> "$STATUS_FILE"
+  log_warn "Impossible de recuperer la page principale."
 fi
 
+log_info "Verification des methodes HTTP annoncees"
+curl -ksS --max-time 15 -X OPTIONS \
+  -D "$OUTPUT_DIR/options-headers.txt" \
+  -o "$OUTPUT_DIR/options-body.txt" \
+  "$TARGET" || true
+
+log_info "Verification de la politique CORS avec une origine externe fictive"
+curl -ksS --max-time 15 \
+  -H 'Origin: https://scanner.invalid' \
+  -D "$OUTPUT_DIR/cors-headers.txt" \
+  -o "$OUTPUT_DIR/cors-body.txt" \
+  "$TARGET" || true
+
+log_step 7 "Analyse et generation des rapports"
 python3 "$SCRIPT_DIR/scripts/analyse.py" \
   --target "$TARGET" \
   --input "$OUTPUT_DIR"
 
-echo
-echo "Analyse terminee."
-echo "Rapport : $OUTPUT_DIR/report.md"
+printf '\n============================================================\n'
+printf ' Scan termine avec Web Security Scanner MVP %s\n' "$VERSION"
+printf ' Rapport HTML : %s/report.html\n' "$OUTPUT_DIR"
+printf ' Rapport MD   : %s/report.md\n' "$OUTPUT_DIR"
+printf ' Routes API   : %s/endpoints.json\n' "$OUTPUT_DIR"
+printf '============================================================\n'
