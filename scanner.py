@@ -25,7 +25,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, Request, build_opener
 
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 USER_AGENT = f"DevSecOps-Scanner/{VERSION}"
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 SQL_ERROR_PATTERNS = re.compile(
@@ -556,14 +556,20 @@ class Scanner:
         return self.request(url, follow_redirects=follow_redirects)
 
     def run_nuclei(self) -> None:
-        if not self.args.active:
+        if not self.args.active or not self.args.nuclei:
+            self.tools["nuclei"] = "disabled"
+            self.log("INFO", "Nuclei non demande : module ignore.")
+            return
+
+        if shutil.which("nuclei") is None:
+            self.tools["nuclei"] = "missing"
+            self.log("WARN", "Nuclei demande mais absent du systeme.")
             return
 
         self.log(
             "INFO",
-            "Nuclei : scan cible sur les alertes medium, high et critical."
+            "Nuclei : scan complementaire limite aux severites medium, high et critical.",
         )
-
         command = [
             "nuclei",
             "-u", self.target,
@@ -573,75 +579,51 @@ class Scanner:
             "-timeout", "5",
             "-retries", "1",
             "-duc",
+            "-silent",
             "-elog", str(self.raw / "nuclei-errors.log"),
         ]
-
         output = self.run_tool(
             "nuclei",
             command,
-            timeout=300,
+            timeout=self.args.nuclei_timeout,
         )
 
         detections = 0
-
         for line in output.splitlines():
             line = line.strip()
-
             if not line.startswith("{"):
                 continue
-
             try:
                 item = json.loads(line)
             except json.JSONDecodeError:
                 continue
 
             info = item.get("info", {})
-            severity = str(
-                info.get("severity", "info")
-            ).lower()
-
-            if severity not in SEVERITY_ORDER:
-                severity = "info"
-
-            matched_url = (
-                item.get("matched-at")
-                or item.get("host")
-                or self.target
-            )
-
+            severity = str(info.get("severity", "info")).lower()
+            matched_url = item.get("matched-at") or item.get("host") or self.target
             self.add_finding(
                 Finding(
-                    title=str(
-                        info.get(
-                            "name",
-                            item.get("template-id", "Alerte Nuclei"),
-                        )
-                    ),
-                    severity=severity,
-                    category="Nuclei",
-                    confidence="confirmed",
-                    evidence=matched_url,
-                    interpretation=(
-                        "Detection issue d'un template Nuclei."
-                    ),
-                    source="Nuclei",
-                    url=matched_url,
+                    str(info.get("name", item.get("template-id", "Alerte Nuclei"))),
+                    severity if severity in SEVERITY_ORDER else "info",
+                    "Nuclei",
+                    "confirmed",
+                    matched_url,
+                    "Detection issue d'un template Nuclei.",
+                    "Nuclei",
+                    matched_url,
                 )
             )
-
             detections += 1
 
         if self.tools.get("nuclei") == "timeout":
             self.log(
                 "WARN",
-                "Nuclei n'a pas termine. Les resultats sont partiels."
+                f"Nuclei interrompu apres {self.args.nuclei_timeout}s. "
+                "Les resultats eventuels sont partiels.",
             )
         else:
-            self.log(
-                "OK",
-                f"Nuclei termine : {detections} detection(s)."
-            )
-        
+            self.log("OK", f"Nuclei termine : {detections} detection(s).")
+
     def run_sqlmap(self) -> None:
         if not self.args.active or shutil.which("sqlmap") is None:
             if self.args.active:
@@ -773,10 +755,11 @@ jobs:
         self.phase(7, total, "Tests actifs limites")
         if self.args.active:
             self.active_mutations()
-            self.run_nuclei()
             self.run_sqlmap()
+            self.run_nuclei()
         else:
-            self.log("INFO", "Mode passif: mutations, Nuclei et sqlmap ignores.")
+            self.tools["nuclei"] = "disabled"
+            self.log("INFO", "Mode passif: mutations, sqlmap et Nuclei ignores.")
         self.phase(8, total, "Analyse ZAP")
         self.run_zap()
         self.phase(9, total, "Generation du rapport")
@@ -895,8 +878,19 @@ body{{font-family:Arial,sans-serif;margin:0;background:#f4f6f8;color:#17202a}}ma
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scanner web pedagogique simplifie")
     parser.add_argument("target", help="URL complete de la cible")
-    parser.add_argument("--active", action="store_true", help="Active les mutations, Nuclei, sqlmap et ZAP actif")
+    parser.add_argument("--active", action="store_true", help="Active les mutations, sqlmap et ZAP actif")
     parser.add_argument("--zap", action="store_true", help="Lance ZAP meme en mode passif")
+    parser.add_argument(
+        "--nuclei",
+        action="store_true",
+        help="Lance Nuclei en complement du mode actif",
+    )
+    parser.add_argument(
+        "--nuclei-timeout",
+        type=int,
+        default=120,
+        help="Duree maximale de Nuclei en secondes (defaut: 120)",
+    )
     parser.add_argument("--har", help="Importe un fichier HAR pour decouvrir les requetes dynamiques")
     parser.add_argument("--profile", choices=["auto", "global", "juice-shop"], default="auto")
     parser.add_argument("--output", default="results")
