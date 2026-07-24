@@ -1,0 +1,5 @@
+results/
+*.har
+*.local.json
+__pycache__/
+*.pyc

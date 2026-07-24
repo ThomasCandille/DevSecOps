@@ -1,0 +1,13 @@
+{
+  "login_url": "/rest/user/login",
+  "method": "POST",
+  "content_type": "application/json",
+  "known_username": "compte-test@example.com",
+  "unknown_username": "compte-inexistant@example.invalid",
+  "wrong_password": "Scanner-Wrong-Password-123!",
+  "attempts": 5,
+  "body_template": {
+    "email": "{username}",
+    "password": "{password}"
+  }
+}

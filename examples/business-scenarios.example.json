@@ -1,0 +1,23 @@
+{
+  "scenarios": [
+    {
+      "name": "Action supposee unique rejouee",
+      "enabled": false,
+      "steps": [
+        {
+          "method": "POST",
+          "url": "/api/coupon/apply",
+          "json": {
+            "code": "CODE-DE-TEST"
+          },
+          "repeat": 2
+        }
+      ],
+      "flag_if": {
+        "all_requests_succeed": true,
+        "severity": "medium",
+        "interpretation": "Les deux executions ont reussi. Verifier si la regle metier autorise la reutilisation."
+      }
+    }
+  ]
+}
