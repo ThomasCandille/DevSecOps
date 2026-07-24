@@ -1,6 +1,10 @@
 # DevSecOps Scanner V2.0.1
 
-Version simplifiee du framework : un lanceur Bash, un scanner Python et un rapport HTML/JSON.
+- [GARNIER Quentin](https://github.com/F1N3X)
+- [LETARD Pierric](https://github.com/Mrpierrouge)
+- [CANDILLE Thomas](https://github.com/ThomasCandille)
+
+Lanceur Bash, un scanner Python et un rapport HTML/JSON.
 
 > Utiliser uniquement sur une cible autorisee. Le mode actif envoie des requetes de test.
 
@@ -56,24 +60,6 @@ Mettre periodiquement les templates a jour :
 
 ```bash
 nuclei -update-templates
-```
-
-## Juice Shop
-
-```bash
-./scan.sh http://127.0.0.1:3000 \
-  --active \
-  --profile juice-shop
-```
-
-Avec un HAR :
-
-```bash
-./scan.sh http://127.0.0.1:3000 \
-  --active \
-  --profile juice-shop \
-  --har navigation.har
-```
 
 ## Resultats
 
