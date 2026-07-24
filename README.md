@@ -1,4 +1,4 @@
-# DevSecOps Scanner V2.0.1
+# DevSecOps Scanner
 
 - [GARNIER Quentin](https://github.com/F1N3X)
 - [LETARD Pierric](https://github.com/Mrpierrouge)
