@@ -15,17 +15,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import (
-    parse_qsl,
-    quote,
-    urljoin,
-    urlparse,
-    urlsplit,
-    urlunsplit,
-)
+from urllib.parse import parse_qsl, quote, urljoin, urlparse, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
-USER_AGENT = "WebSecurityScanner-MVP/0.4"
+USER_AGENT = "DevSecOps-Scanner/1.1.0"
 REQUEST_TIMEOUT = 10
 MAX_BODY_SIZE = 750_000
 MAX_JS_SIZE = 6_000_000
@@ -208,50 +201,31 @@ def build_opener_for(url: str) -> Any:
         handlers.append(HTTPSHandler(context=ssl._create_unverified_context()))
     return build_opener(*handlers)
 
+
 def encode_url_for_request(url: str) -> str:
-    """
-    Convertit une URL Unicode en URL HTTP correctement encodée.
-
-    Exemple :
-    /préférences -> /pr%C3%A9f%C3%A9rences
-    ?q=café      -> ?q=caf%C3%A9
-    """
+    """Encode une URL Unicode en URL HTTP valide sans double-encoder les %."""
     parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError(f"URL HTTP invalide : {url}")
 
-    encoded_path = quote(
-        parts.path,
-        safe="/%:@!$&'()*+,;=-._~",
-    )
+    hostname = parts.hostname.encode("idna").decode("ascii")
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
 
-    encoded_query = quote(
-        parts.query,
-        safe="=&%/:?@!$'()*+,;[]-._~",
-    )
+    netloc = hostname
+    if parts.port:
+        netloc += f":{parts.port}"
 
-    return urlunsplit(
-        (
-            parts.scheme,
-            parts.netloc,
-            encoded_path,
-            encoded_query,
-            "",  # Le fragment #... n'est pas envoyé au serveur.
-        )
-    )
+    encoded_path = quote(parts.path or "/", safe="/%:@!$&'()*+,;=-._~")
+    encoded_query = quote(parts.query, safe="=&%/:?@!$'()*+,;[]-._~")
+    return urlunsplit((parts.scheme, netloc, encoded_path, encoded_query, ""))
+
 
 def request_url(url: str, *, max_size: int = MAX_BODY_SIZE) -> HttpResult:
     started = time.monotonic()
-
     try:
         encoded_url = encode_url_for_request(url)
-
-        request = Request(
-            encoded_url,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "*/*",
-            },
-        )
-
+        request = Request(encoded_url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
         opener = build_opener_for(encoded_url)
         response = opener.open(request, timeout=REQUEST_TIMEOUT)
         body_bytes = response.read(max_size + 1)[:max_size]
@@ -275,13 +249,7 @@ def request_url(url: str, *, max_size: int = MAX_BODY_SIZE) -> HttpResult:
             body=body_bytes.decode(charset, errors="replace"),
             elapsed=round(time.monotonic() - started, 3),
         )
-    except (
-    URLError,
-    TimeoutError,
-    OSError,
-    UnicodeError,
-    ValueError,
-) as error:
+    except (URLError, TimeoutError, OSError, UnicodeError, ValueError) as error:
         return HttpResult(
             requested_url=url,
             final_url=url,
@@ -717,6 +685,7 @@ def extract_routes_from_js(
         for match in pattern.finditer(content):
             add_candidate(match.group("value"), "UNKNOWN", "javascript-router", True, match.end("value"))
 
+
     for source_map in SOURCE_MAP_PATTERN.findall(content):
         add_finding(
             findings,
@@ -778,7 +747,7 @@ def analyse_javascript(
             add_finding=add_finding,
         )
 
-    log_ok(f"{len(endpoints)} route(s) brute(s) extraite(s) du JavaScript.")
+    log_ok(f"{len(endpoints)} route(s) contextuelle(s) extraite(s) du JavaScript.")
     return endpoints, parameters
 
 

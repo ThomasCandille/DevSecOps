@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import re
 from collections import Counter
@@ -332,242 +331,15 @@ def tool_status(directory: Path) -> list[dict[str, str]]:
     return rows
 
 
-def e(value: Any) -> str:
-    return html.escape(str(value if value is not None else ""))
-
-
-def badge(value: str) -> str:
-    value = value.lower()
-    return f'<span class="badge badge-{e(value)}">{e(value)}</span>'
-
-
-def render_findings(findings: list[dict[str, Any]]) -> str:
-    if not findings:
-        return '<p class="empty">Aucun constat consolide.</p>'
-    cards = []
-    for index, item in enumerate(findings, start=1):
-        cards.append(
-            f"""
-            <article class="finding">
-              <div class="finding-head"><h3>{index}. {e(item.get('title'))}</h3>{badge(str(item.get('severity', 'info')))}</div>
-              <dl>
-                <dt>Categorie</dt><dd>{e(item.get('category'))}</dd>
-                <dt>Confiance</dt><dd>{e(item.get('confidence'))}</dd>
-                <dt>Sources</dt><dd>{e(item.get('tool'))}</dd>
-                <dt>Preuve</dt><dd><code>{e(item.get('evidence'))}</code></dd>
-                <dt>Interpretation</dt><dd>{e(item.get('description'))}</dd>
-              </dl>
-            </article>
-            """
-        )
-    return "".join(cards)
-
-
-def render_endpoint_rows(endpoints: list[dict[str, Any]]) -> str:
-    if not endpoints:
-        return '<tr><td colspan="8" class="empty">Aucune route dans cette categorie.</td></tr>'
-    rows = []
-    for item in endpoints:
-        status = item.get("status") if item.get("status") is not None else "-"
-        rows.append(
-            "<tr>"
-            f"<td>{e(item.get('method', 'UNKNOWN'))}</td>"
-            f"<td><code>{e(item.get('path'))}</code></td>"
-            f"<td>{e(item.get('kind', 'server'))}</td>"
-            f"<td>{e(item.get('category', 'Application'))}</td>"
-            f"<td>{badge(str(item.get('sensitivity', 'low')))}</td>"
-            f"<td>{e(status)}</td>"
-            f"<td>{e(item.get('source'))}</td>"
-            f"<td>{e(item.get('classification_reason'))}</td>"
-            "</tr>"
-        )
-    return "".join(rows)
-
-
-def render_parameter_rows(parameters: list[dict[str, Any]]) -> str:
-    if not parameters:
-        return '<tr><td colspan="6" class="empty">Aucun parametre fiable decouvert.</td></tr>'
-    rows = []
-    for item in parameters:
-        rows.append(
-            "<tr>"
-            f"<td>{e(item.get('method'))}</td>"
-            f"<td><code>{e(item.get('path'))}</code></td>"
-            f"<td><code>{e(item.get('name'))}</code></td>"
-            f"<td>{e(item.get('location'))}</td>"
-            f"<td>{e(item.get('source'))}</td>"
-            f"<td>{'oui' if item.get('active_testable') else 'non'}</td>"
-            "</tr>"
-        )
-    return "".join(rows)
-
-
-def write_html(directory: Path, report: dict[str, Any]) -> None:
-    endpoints = report["endpoints"]
-    confirmed = [item for item in endpoints if item.get("classification") == "confirmed"]
-    candidates = [item for item in endpoints if item.get("classification") == "candidate"]
-    rejected = [item for item in endpoints if item.get("classification") == "rejected"]
-    severity_counts = Counter(str(item.get("severity", "info")) for item in report["findings"])
-    statuses = report.get("tool_status", [])
-
-    status_rows = "".join(
-        f"<tr><td>{e(row['tool'])}</td><td>{badge(row['status'])}</td></tr>" for row in statuses
-    ) or '<tr><td colspan="2" class="empty">Etat des outils indisponible.</td></tr>'
-
-    severity_summary = "".join(
-        f'<div class="metric"><strong>{severity_counts.get(level, 0)}</strong><span>{e(level)}</span></div>'
-        for level in ("critical", "high", "medium", "low", "info")
-    )
-
-    profile_text = ", ".join(report.get("profiles", [])) or "global uniquement"
-    active_tests = report.get("active_tests", [])
-
-    document = f"""<!doctype html>
-<html lang="fr">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Rapport consolide - {e(report.get('target'))}</title>
-  <style>
-    :root {{ color-scheme: light; font-family: Inter, Arial, sans-serif; --border:#d9dee7; --muted:#667085; --bg:#f5f7fa; }}
-    * {{ box-sizing:border-box; }}
-    body {{ margin:0; background:var(--bg); color:#172033; line-height:1.45; }}
-    main {{ max-width:1280px; margin:0 auto; padding:32px 22px 60px; }}
-    header, section {{ background:#fff; border:1px solid var(--border); border-radius:14px; padding:22px; margin-bottom:18px; }}
-    h1 {{ margin:0 0 8px; font-size:28px; }} h2 {{ margin-top:0; font-size:21px; }} h3 {{ margin:0; font-size:17px; }}
-    .muted {{ color:var(--muted); }}
-    .metrics {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin-top:18px; }}
-    .metric {{ border:1px solid var(--border); border-radius:10px; padding:14px; display:flex; flex-direction:column; }}
-    .metric strong {{ font-size:24px; }} .metric span {{ color:var(--muted); text-transform:uppercase; font-size:12px; }}
-    .finding {{ border:1px solid var(--border); border-radius:10px; padding:16px; margin:12px 0; }}
-    .finding-head {{ display:flex; justify-content:space-between; gap:10px; align-items:center; }}
-    dl {{ display:grid; grid-template-columns:130px 1fr; gap:6px 12px; margin-bottom:0; }} dt {{ font-weight:700; }} dd {{ margin:0; overflow-wrap:anywhere; }}
-    table {{ width:100%; border-collapse:collapse; font-size:14px; }} th, td {{ text-align:left; border-bottom:1px solid var(--border); padding:10px 8px; vertical-align:top; }} th {{ background:#f8fafc; position:sticky; top:0; }}
-    .table-wrap {{ overflow:auto; max-height:620px; border:1px solid var(--border); border-radius:10px; }}
-    code {{ background:#f1f4f8; padding:2px 5px; border-radius:4px; overflow-wrap:anywhere; }}
-    .badge {{ display:inline-block; border-radius:999px; padding:3px 9px; font-size:12px; font-weight:700; white-space:nowrap; background:#edf1f7; }}
-    .badge-critical,.badge-failed {{ background:#fee4e2; color:#b42318; }}
-    .badge-high {{ background:#ffead5; color:#b54708; }}
-    .badge-medium {{ background:#fef0c7; color:#b54708; }}
-    .badge-low {{ background:#e0f2fe; color:#026aa2; }}
-    .badge-info,.badge-success {{ background:#dcfae6; color:#067647; }}
-    .badge-missing {{ background:#f2f4f7; color:#475467; }}
-    details {{ margin-top:10px; }} summary {{ cursor:pointer; font-weight:700; }} .empty {{ color:var(--muted); text-align:center; }}
-    .notice {{ border-left:4px solid #6172f3; padding:10px 14px; background:#eef4ff; }}
-  </style>
-</head>
-<body><main>
-<header>
-  <h1>Rapport consolide du scan</h1>
-  <p><strong>Cible :</strong> <code>{e(report.get('target'))}</code><br>
-  <strong>Mode :</strong> {e(report.get('mode'))} — <strong>Profil :</strong> {e(profile_text)}</p>
-  <p class="notice">Ce rapport distingue les routes confirmees des simples candidates. Les fragments de code JavaScript et les reponses 404/SPA generiques sont exclus du resume principal.</p>
-  <div class="metrics">
-    <div class="metric"><strong>{len(report['findings'])}</strong><span>constats consolides</span></div>
-    <div class="metric"><strong>{len(confirmed)}</strong><span>endpoints confirmes</span></div>
-    <div class="metric"><strong>{len(candidates)}</strong><span>routes candidates</span></div>
-    <div class="metric"><strong>{len(report['parameters'])}</strong><span>parametres fiables</span></div>
-    <div class="metric"><strong>{len(active_tests)}</strong><span>tests actifs</span></div>
-  </div>
-  <div class="metrics">{severity_summary}</div>
-</header>
-<section><h2>Etat des outils</h2><div class="table-wrap"><table><thead><tr><th>Outil</th><th>Etat</th></tr></thead><tbody>{status_rows}</tbody></table></div></section>
-<section><h2>Constats</h2>{render_findings(report['findings'])}</section>
-<section><h2>Endpoints confirmes</h2><p class="muted">Routes ayant obtenu une reponse HTTP concluante et differente d'une page generique.</p><div class="table-wrap"><table><thead><tr><th>Methode</th><th>Route</th><th>Type</th><th>Categorie</th><th>Sensibilite</th><th>HTTP</th><th>Source</th><th>Justification</th></tr></thead><tbody>{render_endpoint_rows(confirmed)}</tbody></table></div></section>
-<section><h2>Routes candidates</h2><p class="muted">Indices plausibles qui necessitent encore une verification HTTP ou une navigation reelle.</p><div class="table-wrap"><table><thead><tr><th>Methode</th><th>Route</th><th>Type</th><th>Categorie</th><th>Sensibilite</th><th>HTTP</th><th>Source</th><th>Justification</th></tr></thead><tbody>{render_endpoint_rows(candidates)}</tbody></table></div></section>
-<section><h2>Parametres fiables</h2><div class="table-wrap"><table><thead><tr><th>Methode</th><th>Route</th><th>Parametre</th><th>Emplacement</th><th>Source</th><th>Test actif</th></tr></thead><tbody>{render_parameter_rows(report['parameters'])}</tbody></table></div></section>
-<section><h2>Tests actifs</h2><p>{len(active_tests)} parametre(s) ou scenario(s) testes. Les details complets restent disponibles dans <code>active-tests.json</code>.</p></section>
-<section><h2>Limites</h2><ul><li>La cartographie statique ne remplace pas un navigateur executant JavaScript.</li><li>Les formulaires POST, sessions authentifiees, controles d'acces et logiques metier requierent une validation dediee.</li><li>Une route candidate ne doit jamais etre presentee comme une vulnerabilite confirmee.</li></ul>
-<details><summary>Routes rejetees et bruit filtre ({len(rejected)})</summary><div class="table-wrap"><table><thead><tr><th>Methode</th><th>Route</th><th>Type</th><th>Categorie</th><th>Sensibilite</th><th>HTTP</th><th>Source</th><th>Motif du rejet</th></tr></thead><tbody>{render_endpoint_rows(rejected)}</tbody></table></div></details></section>
-</main></body></html>"""
-    (directory / "report-clean.html").write_text(document, encoding="utf-8")
-
-
-def write_markdown(directory: Path, report: dict[str, Any]) -> None:
-    endpoints = report["endpoints"]
-    confirmed = [item for item in endpoints if item.get("classification") == "confirmed"]
-    candidates = [item for item in endpoints if item.get("classification") == "candidate"]
-    rejected = [item for item in endpoints if item.get("classification") == "rejected"]
-    profile_text = ", ".join(report.get("profiles", [])) or "global uniquement"
-
-    lines = [
-        "# Rapport consolide du scan",
-        "",
-        f"- **Cible :** `{report.get('target', '')}`",
-        f"- **Mode :** {report.get('mode', '')}",
-        f"- **Profil :** {profile_text}",
-        f"- **Constats consolides :** {len(report['findings'])}",
-        f"- **Endpoints confirmes :** {len(confirmed)}",
-        f"- **Routes candidates :** {len(candidates)}",
-        f"- **Routes rejetees :** {len(rejected)}",
-        f"- **Parametres fiables :** {len(report['parameters'])}",
-        f"- **Tests actifs :** {len(report.get('active_tests', []))}",
-        "",
-        "> Les routes candidates et rejetees ne sont pas comptees comme des vulnerabilites confirmees.",
-        "",
-        "## Constats",
-        "",
-    ]
-
-    if not report["findings"]:
-        lines.append("Aucun constat consolide.")
-    for index, item in enumerate(report["findings"], start=1):
-        lines.extend([
-            f"### {index}. {item.get('title', '')}",
-            "",
-            f"- Gravite : **{item.get('severity', 'info')}**",
-            f"- Categorie : {item.get('category', '')}",
-            f"- Confiance : {item.get('confidence', '')}",
-            f"- Sources : {item.get('tool', '')}",
-            f"- Preuve : `{item.get('evidence', '')}`",
-            f"- Interpretation : {item.get('description', '')}",
-            "",
-        ])
-
-    def endpoint_table(title: str, rows: list[dict[str, Any]]) -> None:
-        lines.extend([f"## {title}", "", "| Methode | Route | HTTP | Source | Justification |", "|---|---|---:|---|---|"])
-        if not rows:
-            lines.append("| - | Aucune | - | - | - |")
-        for item in rows:
-            lines.append(
-                f"| {item.get('method', 'UNKNOWN')} | `{item.get('path', '')}` | "
-                f"{item.get('status', '-') if item.get('status') is not None else '-'} | "
-                f"{item.get('source', '')} | {item.get('classification_reason', '')} |"
-            )
-        lines.append("")
-
-    endpoint_table("Endpoints confirmes", confirmed)
-    endpoint_table("Routes candidates", candidates)
-
-    lines.extend(["## Parametres fiables", "", "| Methode | Route | Parametre | Emplacement | Test actif |", "|---|---|---|---|---|"])
-    if not report["parameters"]:
-        lines.append("| - | Aucune | - | - | - |")
-    for item in report["parameters"]:
-        lines.append(
-            f"| {item.get('method', '')} | `{item.get('path', '')}` | `{item.get('name', '')}` | "
-            f"{item.get('location', '')} | {'oui' if item.get('active_testable') else 'non'} |"
-        )
-
-    lines.extend([
-        "",
-        "## Limites",
-        "",
-        "- Une route candidate ne constitue pas une vulnerabilite confirmee.",
-        "- Les routes authentifiees, POST et la logique metier demandent une validation manuelle ou un import HAR.",
-        "- Les routes rejetees restent conservees dans `report-clean.json` pour audit.",
-    ])
-    (directory / "report-clean.md").write_text("\n".join(lines), encoding="utf-8")
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Nettoie et consolide le rapport du scanner DevSecOps.")
-    parser.add_argument("--input", required=True, type=Path, help="Dossier results/AAAA-MM-JJ_HH-MM-SS")
+    parser = argparse.ArgumentParser(description="Nettoie et consolide les donnees statiques du scanner DevSecOps.")
+    parser.add_argument("--input", required=True, type=Path, help="Dossier de cartographie statique")
     args = parser.parse_args()
     directory = args.input.resolve()
 
-    raw_report = load_json(directory / "report.json", {})
+    raw_report = load_json(directory / "raw-analysis.json", {})
     if not isinstance(raw_report, dict) or not raw_report:
-        raise SystemExit(f"report.json introuvable ou invalide dans {directory}")
+        raise SystemExit(f"raw-analysis.json introuvable ou invalide dans {directory}")
 
     raw_endpoints = raw_report.get("endpoints")
     if not isinstance(raw_endpoints, list):
@@ -590,7 +362,7 @@ def main() -> None:
 
     classification_counts = Counter(str(item.get("classification")) for item in endpoints)
     payload = {
-        "version": "0.5.0-report-cleaner",
+        "version": "1.1.0-static-cleaner",
         "source_report_version": raw_report.get("version"),
         "target": target,
         "mode": raw_report.get("mode", "unknown"),
@@ -612,17 +384,9 @@ def main() -> None:
         "active_tests": active_tests,
     }
 
-    (directory / "report-clean.json").write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    write_markdown(directory, payload)
-    write_html(directory, payload)
-
-    print(" [OK] Rapport consolide genere :")
-    print(f"      - {directory / 'report-clean.html'}")
-    print(f"      - {directory / 'report-clean.md'}")
-    print(f"      - {directory / 'report-clean.json'}")
+    output = directory / "static-analysis.json"
+    output.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f" [OK] Donnees statiques consolidees : {output}")
     print(
         "      Resume : "
         f"{len(findings)} constat(s), "

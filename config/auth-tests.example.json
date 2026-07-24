@@ -1,0 +1,31 @@
+{
+  "username_enumeration": {
+    "enabled": false,
+    "request": {
+      "method": "POST",
+      "path": "/rest/user/login",
+      "json": {
+        "email": "{{username}}",
+        "password": "{{password}}"
+      }
+    },
+    "known_username": "replace-with-a-lab-account@example.test",
+    "unknown_username": "wss-account-that-does-not-exist@example.test",
+    "wrong_password": "Wss-Wrong-Password-48291!",
+    "repetitions": 2
+  },
+  "rate_limit": {
+    "enabled": false,
+    "request": {
+      "method": "POST",
+      "path": "/rest/user/login",
+      "json": {
+        "email": "{{username}}",
+        "password": "{{password}}"
+      }
+    },
+    "username": "wss-rate-limit-test@example.test",
+    "password": "Wss-Wrong-Password-48291!",
+    "attempts": 5
+  }
+}

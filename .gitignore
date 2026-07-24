@@ -1,4 +1,10 @@
 results/*
 !results/.gitkeep
+backups/
 __pycache__/
 *.pyc
+*.har
+config/*.local.json
+config/*secrets*.json
+.venv/
+.DS_Store

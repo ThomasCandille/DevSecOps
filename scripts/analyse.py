@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import re
 import ssl
@@ -16,14 +15,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen
 
-from discovery import discover_surface
+from discovery import discover_surface, encode_url_for_request
 
 MAX_JS_FILES = 30
 MAX_JS_SIZE = 5_000_000
 MAX_RESPONSE_SIZE = 1_000_000
 MAX_ACTIVE_TARGETS = 20
 REQUEST_TIMEOUT = 12
-USER_AGENT = "WebSecurityScanner-MVP/0.4"
+USER_AGENT = "DevSecOps-Scanner/1.1.0"
 
 SECURITY_HEADERS = {
     "content-security-policy": (
@@ -482,8 +481,9 @@ def safe_filename(url: str, index: int) -> str:
 
 
 def fetch_text(url: str) -> str:
-    request = Request(url, headers={"User-Agent": USER_AGENT})
-    context = ssl._create_unverified_context() if url.startswith("https://") else None
+    encoded_url = encode_url_for_request(url)
+    request = Request(encoded_url, headers={"User-Agent": USER_AGENT})
+    context = ssl._create_unverified_context() if encoded_url.startswith("https://") else None
     with urlopen(request, timeout=REQUEST_TIMEOUT, context=context) as response:
         data = response.read(MAX_JS_SIZE + 1)
         if len(data) > MAX_JS_SIZE:
@@ -712,8 +712,9 @@ def deduplicate_records(records: list[dict[str, Any]], keys: tuple[str, ...]) ->
 
 
 def request_get(url: str) -> HttpResult:
-    request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
-    context = ssl._create_unverified_context() if url.startswith("https://") else None
+    encoded_url = encode_url_for_request(url)
+    request = Request(encoded_url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+    context = ssl._create_unverified_context() if encoded_url.startswith("https://") else None
     handlers: list[Any] = [NoRedirectHandler()]
     if context is not None:
         handlers.append(HTTPSHandler(context=context))
@@ -743,7 +744,7 @@ def request_get(url: str) -> HttpResult:
             body=body_bytes[:MAX_RESPONSE_SIZE].decode(charset, errors="replace"),
             elapsed=round(time.monotonic() - started, 3),
         )
-    except (URLError, TimeoutError, OSError) as error:
+    except (URLError, TimeoutError, OSError, UnicodeError, ValueError) as error:
         return HttpResult(
             url=url,
             status=0,
@@ -914,238 +915,8 @@ def read_tool_status(directory: Path) -> list[tuple[str, str]]:
     return statuses
 
 
-def write_markdown(
-    target: str,
-    mode: str,
-    directory: Path,
-    findings: list[dict[str, Any]],
-    endpoints: list[dict[str, Any]],
-    parameters: list[dict[str, Any]],
-    sensitive_routes: list[dict[str, Any]],
-    profiles: list[str],
-    active_results: list[dict[str, Any]],
-) -> None:
-    lines = [
-        "# Rapport du scan MVP 0.4",
-        "",
-        f"**Cible :** `{target}`",
-        f"**Mode :** `{mode}`",
-        f"**Profil applique :** `{', '.join(profiles) if profiles else 'global uniquement'}`",
-        "",
-        "## Etat des outils",
-        "",
-        "| Outil | Etat |",
-        "|---|---|",
-    ]
-
-    for tool, status in read_tool_status(directory):
-        lines.append(f"| {tool} | {status} |")
-
-    lines.extend(["", f"## Constats ({len(findings)})", ""])
-    if not findings:
-        lines.append("Aucune faiblesse n'a ete extraite automatiquement.")
-    else:
-        for index, finding in enumerate(findings, start=1):
-            lines.extend(
-                [
-                    f"### {index}. {finding['title']}",
-                    "",
-                    f"- **Categorie :** {finding['category']}",
-                    f"- **Gravite :** {finding['severity']}",
-                    f"- **Confiance :** {finding['confidence']}",
-                    f"- **Outil :** {finding['tool']}",
-                    f"- **Preuve :** `{finding['evidence']}`",
-                    f"- **Interpretation :** {finding['description']}",
-                    "",
-                ]
-            )
-
-    lines.extend(["## Routes sensibles", ""])
-    if sensitive_routes:
-        lines.extend(["| Route | Type | Categorie | Sensibilite | HTTP | Accessible | Source |", "|---|---|---|---|---|---|---|"])
-        for item in sensitive_routes:
-            status = item.get("status") if item.get("status") is not None else "-"
-            accessible = "oui" if item.get("accessible") is True else "non" if item.get("accessible") is False else "non testee"
-            lines.append(
-                f"| `{item.get('path', '')}` | {item.get('kind', '')} | {item.get('category', '')} | "
-                f"{item.get('sensitivity', '')} | {status} | {accessible} | {item.get('source', '')} |"
-            )
-    else:
-        lines.append("Aucune route sensible identifiee.")
-
-    lines.extend(["", "## Endpoints decouverts", ""])
-    if endpoints:
-        lines.extend(["| Methode | Route | Type | Sensibilite | HTTP | Source |", "|---|---|---|---|---|---|"])
-        for endpoint in endpoints:
-            status = endpoint.get("status") if endpoint.get("status") is not None else "-"
-            lines.append(
-                f"| {endpoint.get('method', 'UNKNOWN')} | `{endpoint.get('path', '')}` | {endpoint.get('kind', '')} | "
-                f"{endpoint.get('sensitivity', '')} | {status} | {endpoint.get('source', '')} |"
-            )
-    else:
-        lines.append("Aucun endpoint extrait automatiquement.")
-
-    lines.extend(["", "## Parametres decouverts", ""])
-    if parameters:
-        lines.extend(["| Methode | Route | Parametre | Emplacement | Source | Test actif |", "|---|---|---|---|---|---|"])
-        for parameter in parameters:
-            lines.append(
-                f"| {parameter['method']} | `{parameter['path']}` | `{parameter['name']}` | "
-                f"{parameter['location']} | {parameter['source']} | "
-                f"{'oui' if parameter.get('active_testable') else 'non'} |"
-            )
-    else:
-        lines.append("Aucun parametre associe a une route n'a ete decouvert.")
-
-    lines.extend(["", "## Tests actifs", ""])
-    if mode != "active":
-        lines.append("Non executes : relancer avec `--active`.")
-    elif active_results:
-        lines.append(f"{len(active_results)} parametre(s) GET ont ete testes avec des mutations limitees.")
-    else:
-        lines.append("Aucun parametre GET testable n'a ete trouve.")
-
-    lines.extend(
-        [
-            "",
-            "## Limites",
-            "",
-            "La cartographie statique ne remplace pas un navigateur executant le JavaScript. Les routes authentifiees, "
-            "les formulaires POST et les controles d'acces complexes restent a verifier manuellement ou avec un fichier HAR.",
-            "",
-        ]
-    )
-    (directory / "report.md").write_text("\n".join(lines), encoding="utf-8")
-
-
-def severity_class(severity: str) -> str:
-    return severity if severity in {"critical", "high", "medium", "low", "info"} else "info"
-
-
-def write_html(
-    target: str,
-    mode: str,
-    directory: Path,
-    findings: list[dict[str, Any]],
-    endpoints: list[dict[str, Any]],
-    parameters: list[dict[str, Any]],
-    sensitive_routes: list[dict[str, Any]],
-    profiles: list[str],
-    active_results: list[dict[str, Any]],
-) -> None:
-    status_rows = "".join(
-        f"<tr><td>{html.escape(tool)}</td><td>{html.escape(status)}</td></tr>"
-        for tool, status in read_tool_status(directory)
-    ) or '<tr><td colspan="2">Aucun statut disponible</td></tr>'
-
-    finding_cards = []
-    for index, finding in enumerate(findings, start=1):
-        severity = severity_class(finding["severity"])
-        finding_cards.append(
-            f"""
-            <article class="finding">
-              <div class="finding-title">
-                <h3>{index}. {html.escape(finding['title'])}</h3>
-                <span class="badge {severity}">{html.escape(finding['severity'])}</span>
-              </div>
-              <dl>
-                <dt>Categorie</dt><dd>{html.escape(finding['category'])}</dd>
-                <dt>Confiance</dt><dd>{html.escape(finding['confidence'])}</dd>
-                <dt>Outil</dt><dd>{html.escape(finding['tool'])}</dd>
-                <dt>Preuve</dt><dd><code>{html.escape(finding['evidence'])}</code></dd>
-                <dt>Interpretation</dt><dd>{html.escape(finding['description'])}</dd>
-              </dl>
-            </article>
-            """
-        )
-    if not finding_cards:
-        finding_cards.append("<p>Aucune faiblesse extraite automatiquement.</p>")
-
-    sensitive_rows = "".join(
-        "<tr>"
-        f"<td><code>{html.escape(str(item.get('path', '')))}</code></td>"
-        f"<td>{html.escape(str(item.get('kind', '')))}</td>"
-        f"<td>{html.escape(str(item.get('category', '')))}</td>"
-        f"<td>{html.escape(str(item.get('sensitivity', '')))}</td>"
-        f"<td>{html.escape(str(item.get('status') if item.get('status') is not None else '-'))}</td>"
-        f"<td>{'oui' if item.get('accessible') is True else 'non' if item.get('accessible') is False else 'non testee'}</td>"
-        f"<td>{html.escape(str(item.get('source', '')))}</td>"
-        "</tr>"
-        for item in sensitive_routes
-    ) or '<tr><td colspan="7">Aucune route sensible identifiee.</td></tr>'
-
-    endpoint_rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(str(endpoint.get('method', 'UNKNOWN')))}</td>"
-        f"<td><code>{html.escape(str(endpoint.get('path', '')))}</code></td>"
-        f"<td>{html.escape(str(endpoint.get('kind', '')))}</td>"
-        f"<td>{html.escape(str(endpoint.get('sensitivity', '')))}</td>"
-        f"<td>{html.escape(str(endpoint.get('status') if endpoint.get('status') is not None else '-'))}</td>"
-        f"<td>{html.escape(str(endpoint.get('source', '')))}</td>"
-        "</tr>"
-        for endpoint in endpoints
-    ) or '<tr><td colspan="6">Aucun endpoint decouvert.</td></tr>'
-
-    parameter_rows = "".join(
-        f"<tr><td>{html.escape(parameter['method'])}</td><td><code>{html.escape(parameter['path'])}</code></td>"
-        f"<td><code>{html.escape(parameter['name'])}</code></td><td>{html.escape(parameter['location'])}</td>"
-        f"<td>{html.escape(parameter['source'])}</td><td>{'oui' if parameter.get('active_testable') else 'non'}</td></tr>"
-        for parameter in parameters
-    ) or '<tr><td colspan="6">Aucun parametre associe a une route.</td></tr>'
-
-    active_summary = (
-        f"{len(active_results)} parametre(s) GET testes. Details dans <code>active-tests.json</code>."
-        if mode == "active"
-        else "Tests non executes. Relancer avec <code>--active</code>."
-    )
-    profile_text = ", ".join(profiles) if profiles else "global uniquement"
-
-    document = f"""<!doctype html>
-<html lang="fr">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Rapport de securite - {html.escape(target)}</title>
-  <style>
-    :root {{ color-scheme: light; font-family: Arial, sans-serif; }}
-    body {{ margin: 0; background: #f3f5f7; color: #1d2733; }}
-    main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 60px; }}
-    header, section, .finding {{ background: white; border: 1px solid #dfe5eb; border-radius: 10px; padding: 22px; margin-bottom: 18px; }}
-    h1, h2, h3 {{ margin-top: 0; }}
-    .target {{ overflow-wrap: anywhere; }}
-    table {{ width: 100%; border-collapse: collapse; display: block; overflow-x: auto; }}
-    th, td {{ text-align: left; padding: 10px; border-bottom: 1px solid #e7ebef; vertical-align: top; }}
-    .finding-title {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }}
-    .badge {{ border-radius: 999px; padding: 5px 10px; font-size: .8rem; font-weight: bold; text-transform: uppercase; }}
-    .critical, .high {{ background: #ffd7d7; }} .medium {{ background: #ffe8bd; }}
-    .low {{ background: #fff4bd; }} .info {{ background: #dcecff; }}
-    dl {{ display: grid; grid-template-columns: 130px 1fr; gap: 8px 14px; margin-bottom: 0; }}
-    dt {{ font-weight: bold; }} dd {{ margin: 0; min-width: 0; overflow-wrap: anywhere; }}
-    code {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
-    @media (max-width: 650px) {{ dl {{ grid-template-columns: 1fr; }} .finding-title {{ display: block; }} }}
-  </style>
-</head>
-<body><main>
-  <header>
-    <h1>Rapport du scan MVP 0.4</h1>
-    <p class="target"><strong>Cible :</strong> <code>{html.escape(target)}</code></p>
-    <p><strong>Mode :</strong> {html.escape(mode)} — <strong>Profil :</strong> {html.escape(profile_text)}</p>
-    <p><strong>Resume :</strong> {len(findings)} constat(s), {len(endpoints)} endpoint(s), {len(parameters)} parametre(s), {len(sensitive_routes)} route(s) sensible(s).</p>
-  </header>
-  <section><h2>Etat des outils</h2><table><thead><tr><th>Outil</th><th>Etat</th></tr></thead><tbody>{status_rows}</tbody></table></section>
-  <section><h2>Constats</h2>{''.join(finding_cards)}</section>
-  <section><h2>Routes sensibles</h2><table><thead><tr><th>Route</th><th>Type</th><th>Categorie</th><th>Sensibilite</th><th>HTTP</th><th>Accessible</th><th>Source</th></tr></thead><tbody>{sensitive_rows}</tbody></table></section>
-  <section><h2>Endpoints decouverts</h2><table><thead><tr><th>Methode</th><th>Route</th><th>Type</th><th>Sensibilite</th><th>HTTP</th><th>Source</th></tr></thead><tbody>{endpoint_rows}</tbody></table></section>
-  <section><h2>Parametres decouverts</h2><table><thead><tr><th>Methode</th><th>Route</th><th>Parametre</th><th>Emplacement</th><th>Source</th><th>Test actif</th></tr></thead><tbody>{parameter_rows}</tbody></table></section>
-  <section><h2>Tests actifs</h2><p>{active_summary}</p></section>
-  <section><h2>Limites</h2><p>La cartographie statique ne remplace pas un navigateur executant le JavaScript. Les routes authentifiees, formulaires POST et controles d'acces complexes restent a verifier manuellement ou via un fichier HAR.</p></section>
-</main></body></html>
-"""
-    (directory / "report.html").write_text(document, encoding="utf-8")
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Analyse les sorties du scanner MVP.")
+    parser = argparse.ArgumentParser(description="Analyse les sorties du scanner DevSecOps.")
     parser.add_argument("--target", required=True)
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--mode", choices=["passive", "active"], default="passive")
@@ -1188,13 +959,14 @@ def main() -> None:
     else:
         log("Mode passif : tests de mutation ignores.")
 
-    (args.input / "active-tests.json").write_text(
-        json.dumps(active_results, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    if args.mode == "active":
+        (args.input / "active-tests.json").write_text(
+            json.dumps(active_results, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     findings = deduplicate(findings)
     payload = {
-        "version": "0.4.0",
+        "version": "1.1.0",
         "target": args.target,
         "mode": args.mode,
         "profiles": profiles,
@@ -1210,19 +982,11 @@ def main() -> None:
         "active_tests": active_results,
     }
 
-    log("Generation des rapports JSON, Markdown et HTML")
-    (args.input / "report.json").write_text(
+    log("Generation des donnees statiques JSON")
+    (args.input / "raw-analysis.json").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    write_markdown(
-        args.target, args.mode, args.input, findings, endpoints, parameters,
-        sensitive_routes, profiles, active_results
-    )
-    write_html(
-        args.target, args.mode, args.input, findings, endpoints, parameters,
-        sensitive_routes, profiles, active_results
-    )
-    log_ok("Rapports generes avec succes.")
+    log_ok("Donnees statiques generees avec succes.")
 
 
 if __name__ == "__main__":

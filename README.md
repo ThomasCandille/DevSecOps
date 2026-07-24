@@ -1,94 +1,141 @@
-# Web Security Scanner — MVP 0.4
+# DevSecOps Scanner V1.1
 
-Scanner local destiné à OWASP Juice Shop et aux applications explicitement autorisées.
+Framework pédagogique d’analyse dynamique de sécurité web. Il accepte directement toute URL HTTP ou HTTPS fournie en argument, sans liste blanche locale à maintenir.
 
-## Nouveautés
+> Utilise uniquement ce scanner sur un site pour lequel tu disposes d’une autorisation explicite.
 
-- exploration HTML limitée au même site ;
-- analyse contextuelle des appels `fetch`, Axios, clients HTTP et routes SPA ;
-- distinction entre routes serveur et routes navigateur `/#/...` ;
-- extraction des paramètres de requête et de chemin ;
-- lecture de `robots.txt`, `sitemap.xml` et des résultats Gobuster ;
-- vérification de chemins sensibles courants ;
-- détection des réponses génériques des SPA pour éviter les faux positifs ;
-- profil OWASP Juice Shop détecté automatiquement ;
-- suppression des faux paramètres issus du JavaScript minifié ;
-- déduplication des alertes Nikto sur les headers.
+## Fonctions principales
 
-## Utilisation
+- reconnaissance avec WhatWeb, Nmap, Gobuster et Nikto ;
+- analyse des headers, cookies, CORS et méthodes HTTP ;
+- cartographie HTML et JavaScript contextuelle ;
+- import HAR pour les paramètres GET, formulaires et JSON ;
+- mutations limitées : validation des entrées, réflexion/XSS potentielle, indices SQLi et redirections ouvertes ;
+- analyse passive des JWT ;
+- tests configurables d’authentification, de session, d’IDOR/BOLA et de logique métier ;
+- intégration ZAP passive ou active sur demande ;
+- rapport final HTML, JSON et Markdown.
+
+Le scanner signale des indices et conserve des preuves. Il ne remplace pas une validation humaine.
+
+## Installation
 
 ```bash
-chmod +x scan.sh
+chmod +x install.sh
+./install.sh
+```
+
+L’installation ne lance pas `apt` et ne modifie pas automatiquement Kali. Les outils absents sont signalés puis ignorés.
+
+## Analyser une cible
+
+Aucune modification de configuration n’est nécessaire. Fournis directement l’URL complète :
+
+```bash
+./scan.sh https://staging.exemple.fr
 ./scan.sh http://127.0.0.1:3000
 ```
 
-Avec les tests actifs limités :
+Le protocole doit être `http://` ou `https://`. Le port peut être précisé dans l’URL.
+
+## Commandes
+
+### Vérification du projet
 
 ```bash
-./scan.sh http://127.0.0.1:3000 --active
+./scan.sh --check
 ```
 
-Forcer le profil Juice Shop :
+### Analyse passive
 
 ```bash
-./scan.sh http://127.0.0.1:3000 --active --profile juice-shop
+./scan.sh https://staging.exemple.fr
 ```
 
-Désactiver les profils spécifiques :
+### Analyse active à partir d’un HAR
 
 ```bash
-./scan.sh http://127.0.0.1:3000 --profile none
+./scan.sh https://staging.exemple.fr \
+  --active \
+  --har navigation.har
 ```
 
-## Fonctionnement
+### Inclure certains corps POST/JSON
 
-1. Bash lance WhatWeb, Nmap, Gobuster, Nikto et Curl.
-2. Python explore les pages HTML du même site.
-3. Les fichiers JavaScript sont téléchargés et analysés.
-4. Les routes trouvées sont fusionnées avec Gobuster, `robots.txt` et `sitemap.xml`.
-5. Les chemins sensibles de `config/sensitive-paths.txt` sont vérifiés par des requêtes GET limitées.
-6. Le profil Juice Shop complète la recherche avec des routes connues du laboratoire.
-7. En mode actif, seuls les paramètres GET fiables sont modifiés.
+```bash
+./scan.sh https://staging.exemple.fr \
+  --active \
+  --active-post \
+  --har navigation.har
+```
 
-## Fichiers de sortie
+### Deux comptes et scénarios avancés
 
-Dans `results/AAAA-MM-JJ_HH-MM-SS/` :
+```bash
+cp config/auth-tests.example.json config/auth-tests.local.json
+cp config/business-scenarios.example.json config/business-scenarios.local.json
+```
 
-- `report.html` : rapport principal ;
-- `report.json` et `report.md` ;
-- `endpoints.json` : routes consolidées ;
-- `parameters.json` : paramètres liés à une route ;
-- `sensitive-routes.json` : routes sensibles réellement détectées ;
-- `route-probes.json` : ensemble des chemins testés, y compris les absents ;
-- `crawl-pages.json` : pages explorées ;
-- `active-tests.json` : résultats des mutations GET ;
-- `javascript/` : fichiers JavaScript téléchargés.
+Adapte et active uniquement les scénarios compatibles avec la cible, puis :
 
-## Personnalisation
+```bash
+./scan.sh https://staging.exemple.fr \
+  --active \
+  --har navigation.har \
+  --har-user-a user-a.har \
+  --har-user-b user-b.har \
+  --auth-config config/auth-tests.local.json \
+  --scenario-config config/business-scenarios.local.json \
+  --all-auth-tests
+```
 
-Ajouter des chemins globaux dans :
+### ZAP
+
+```bash
+./scan.sh https://staging.exemple.fr --zap
+./scan.sh https://staging.exemple.fr --active --zap-active
+```
+
+## Organisation des résultats
 
 ```text
-config/sensitive-paths.txt
+results/
+└── staging-exemple-fr_443/
+    ├── latest
+    ├── latest-report.html
+    └── 20260724T083015Z_active_a1b2c3d4/
+        ├── 00-meta/              paramètres, environnement, état des outils
+        ├── 01-raw/               sorties brutes et réponses HTTP
+        ├── 02-static/            cartographie et données statiques consolidées
+        ├── 03-dynamic/           HAR, paramètres et mutations (si un HAR est fourni)
+        ├── 04-authentication/    authentification et session (si demandé)
+        ├── 05-access-control/    comparaisons de comptes (si demandé)
+        ├── 06-business-logic/    scénarios métier (si demandé)
+        ├── 07-zap/               rapports ZAP (si demandé)
+        ├── 08-report/            rapport final
+        └── 09-logs/              journal console et logs des modules
 ```
 
-Format :
+Rapport principal :
 
 ```text
-Categorie|/route
+08-report/security-assessment.html
 ```
 
-Créer un profil dans :
+## Interprétation
 
-```text
-config/profiles/nom-du-profil.txt
-```
+- **confirmed** : observation directement vérifiée par le scanner ;
+- **probable** : comportement fortement suspect à confirmer ;
+- **possible** : indice nécessitant une analyse manuelle.
 
-Puis le lancer avec `--profile nom-du-profil`.
+Une entrée réfléchie n’est pas automatiquement une XSS. Une erreur SQL n’est pas automatiquement une injection exploitable. Une réponse similaire entre deux comptes doit être vérifiée avec la propriété réelle de la ressource.
 
-Le profil Juice Shop s’appuie notamment sur les routes documentées dans :
-https://github.com/Whyiest/Juice-Shop-Write-up/tree/main
+## Sécurité et limites
 
-## Limites
-
-Le scanner ne remplace pas un navigateur exécutant le JavaScript ni une analyse avec Burp ou ZAP. Les formulaires POST, les sessions authentifiées, les contrôles d’accès et la logique métier nécessitent encore des tests dédiés.
+- utilise uniquement des cibles autorisées ;
+- privilégie une préproduction ou un laboratoire pour le mode actif ;
+- emploie des comptes et données de test ;
+- ne publie jamais les fichiers HAR ou `*.local.json` ;
+- le test de logout peut fermer la session enregistrée ;
+- certains scénarios POST peuvent modifier les données ;
+- aucune analyse automatisée ne couvre entièrement la logique métier.

@@ -1,0 +1,84 @@
+{
+  "scenarios": [
+    {
+      "id": "duplicate-action-example",
+      "name": "Verifier le rejet d'une action rejouee",
+      "description": "Exemple generique a adapter a une action de laboratoire sans impact reel.",
+      "enabled": false,
+      "variables": {
+        "test_value": "WSS_TEST_VALUE"
+      },
+      "steps": [
+        {
+          "id": "first",
+          "request": {
+            "method": "POST",
+            "path": "/api/example-action",
+            "auth": "user_a",
+            "json": {
+              "value": "{{test_value}}"
+            }
+          }
+        },
+        {
+          "id": "second",
+          "repeat_of": "first"
+        }
+      ],
+      "assertions": [
+        {
+          "type": "status_not_in",
+          "step": "second",
+          "values": [200, 201, 204]
+        }
+      ],
+      "finding": {
+        "title": "Action sensible potentiellement rejouable",
+        "category": "Business Logic",
+        "severity": "medium",
+        "confidence": "probable",
+        "description": "La seconde execution a ete acceptee alors que le scenario attendait un rejet. Confirmer l'impact metier."
+      }
+    },
+    {
+      "id": "cross-account-example",
+      "name": "Comparer une ressource entre deux comptes",
+      "description": "Exemple declaratif pour une route connue. Utiliser des comptes et objets de laboratoire.",
+      "enabled": false,
+      "variables": {
+        "resource_id": "123"
+      },
+      "steps": [
+        {
+          "id": "owner",
+          "request": {
+            "method": "GET",
+            "path": "/api/resources/{{resource_id}}",
+            "auth": "user_a"
+          }
+        },
+        {
+          "id": "other",
+          "request": {
+            "method": "GET",
+            "path": "/api/resources/{{resource_id}}",
+            "auth": "user_b"
+          }
+        }
+      ],
+      "assertions": [
+        {
+          "type": "status_not_in",
+          "step": "other",
+          "values": [200, 201, 204]
+        }
+      ],
+      "finding": {
+        "title": "Ressource potentiellement accessible depuis un autre compte",
+        "category": "Broken Access Control",
+        "severity": "high",
+        "confidence": "probable"
+      }
+    }
+  ]
+}
