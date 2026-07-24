@@ -558,18 +558,90 @@ class Scanner:
     def run_nuclei(self) -> None:
         if not self.args.active:
             return
-        output = self.run_tool("nuclei", ["nuclei", "-u", self.target, "-jsonl", "-severity", "info,low,medium,high,critical", "-rl", "5", "-silent"], 600)
+
+        self.log(
+            "INFO",
+            "Nuclei : scan cible sur les alertes medium, high et critical."
+        )
+
+        command = [
+            "nuclei",
+            "-u", self.target,
+            "-jsonl",
+            "-severity", "medium,high,critical",
+            "-rl", "10",
+            "-timeout", "5",
+            "-retries", "1",
+            "-duc",
+            "-elog", str(self.raw / "nuclei-errors.log"),
+        ]
+
+        output = self.run_tool(
+            "nuclei",
+            command,
+            timeout=300,
+        )
+
+        detections = 0
+
         for line in output.splitlines():
+            line = line.strip()
+
+            if not line.startswith("{"):
+                continue
+
             try:
                 item = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            info = item.get("info", {})
-            severity = str(info.get("severity", "info")).lower()
-            self.add_finding(Finding(str(info.get("name", item.get("template-id", "Alerte Nuclei"))), severity if severity in SEVERITY_ORDER else "info",
-                                     "Nuclei", "confirmed", item.get("matched-at", item.get("host", "Detection Nuclei")),
-                                     "Detection issue d'un template Nuclei.", "Nuclei", item.get("matched-at", self.target)))
 
+            info = item.get("info", {})
+            severity = str(
+                info.get("severity", "info")
+            ).lower()
+
+            if severity not in SEVERITY_ORDER:
+                severity = "info"
+
+            matched_url = (
+                item.get("matched-at")
+                or item.get("host")
+                or self.target
+            )
+
+            self.add_finding(
+                Finding(
+                    title=str(
+                        info.get(
+                            "name",
+                            item.get("template-id", "Alerte Nuclei"),
+                        )
+                    ),
+                    severity=severity,
+                    category="Nuclei",
+                    confidence="confirmed",
+                    evidence=matched_url,
+                    interpretation=(
+                        "Detection issue d'un template Nuclei."
+                    ),
+                    source="Nuclei",
+                    url=matched_url,
+                )
+            )
+
+            detections += 1
+
+        if self.tools.get("nuclei") == "timeout":
+            self.log(
+                "WARN",
+                "Nuclei n'a pas termine. Les resultats sont partiels."
+            )
+        else:
+            self.log(
+                "OK",
+                f"Nuclei termine : {detections} detection(s)."
+            )
+        
     def run_sqlmap(self) -> None:
         if not self.args.active or shutil.which("sqlmap") is None:
             if self.args.active:
