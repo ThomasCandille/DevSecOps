@@ -1,141 +1,100 @@
-# DevSecOps Scanner V1.1
+# DevSecOps Scanner V2
 
-Framework pédagogique d’analyse dynamique de sécurité web. Il accepte directement toute URL HTTP ou HTTPS fournie en argument, sans liste blanche locale à maintenir.
+Version simplifiée du framework : deux scripts seulement, un dossier de résultats par scan et un rapport final HTML/JSON.
 
-> Utilise uniquement ce scanner sur un site pour lequel tu disposes d’une autorisation explicite.
+> Utiliser uniquement sur une cible autorisée. Le mode actif envoie des requêtes de test.
 
-## Fonctions principales
+## Pourquoi la V1 ne trouvait presque rien
 
-- reconnaissance avec WhatWeb, Nmap, Gobuster et Nikto ;
-- analyse des headers, cookies, CORS et méthodes HTTP ;
-- cartographie HTML et JavaScript contextuelle ;
-- import HAR pour les paramètres GET, formulaires et JSON ;
-- mutations limitées : validation des entrées, réflexion/XSS potentielle, indices SQLi et redirections ouvertes ;
-- analyse passive des JWT ;
-- tests configurables d’authentification, de session, d’IDOR/BOLA et de logique métier ;
-- intégration ZAP passive ou active sur demande ;
-- rapport final HTML, JSON et Markdown.
+Le mode actif ne disposait d'aucun paramètre GET fiable, aucun HAR n'était fourni et ZAP était absent. De plus, les fichiers `universalTouchGamepad.js` et les chaînes `Selkies` indiquent que le port 3000 analysé ne correspond probablement pas à OWASP Juice Shop.
 
-Le scanner signale des indices et conserve des preuves. Il ne remplace pas une validation humaine.
+La V2 affiche désormais clairement l'application détectée et avertit lorsque la cible ressemble à Selkies plutôt qu'à Juice Shop.
 
-## Installation
+## Fichiers du projet
 
-```bash
-chmod +x install.sh
-./install.sh
+```text
+DevSecOps-v2.0.0/
+├── scan.sh
+├── scanner.py
+└── README.md
 ```
 
-L’installation ne lance pas `apt` et ne modifie pas automatiquement Kali. Les outils absents sont signalés puis ignorés.
-
-## Analyser une cible
-
-Aucune modification de configuration n’est nécessaire. Fournis directement l’URL complète :
+## Outils recommandés sur Kali
 
 ```bash
-./scan.sh https://staging.exemple.fr
+sudo apt update
+sudo apt install zaproxy nuclei sqlmap nikto nmap gobuster whatweb seclists
+```
+
+Les outils absents sont ignorés avec un avertissement.
+
+## Utilisation
+
+### Scan passif
+
+```bash
 ./scan.sh http://127.0.0.1:3000
 ```
 
-Le protocole doit être `http://` ou `https://`. Le port peut être précisé dans l’URL.
-
-## Commandes
-
-### Vérification du projet
+### Scan actif générique
 
 ```bash
-./scan.sh --check
+./scan.sh http://127.0.0.1:3000 --active
 ```
 
-### Analyse passive
+Le mode actif ajoute :
+
+- sondes de routes sensibles ;
+- mutations de paramètres découverts ;
+- réflexion/XSS potentielle ;
+- erreurs SQL ;
+- redirections ouvertes ;
+- Nuclei ;
+- sqlmap limité, sans extraction de données ;
+- ZAP actif lorsqu'il est installé.
+
+### Forcer le profil Juice Shop
+
+À utiliser seulement si la cible est bien une instance Juice Shop :
 
 ```bash
-./scan.sh https://staging.exemple.fr
+./scan.sh http://127.0.0.1:3000 --active --profile juice-shop
 ```
 
-### Analyse active à partir d’un HAR
+Le profil ajoute des contrôles sur `/ftp`, `/metrics`, `/api/Challenges`, la recherche de produits et le formulaire de connexion.
+
+### Import HAR
+
+Pour une application JavaScript moderne, naviguer dans le site avec Burp ou le navigateur, exporter un HAR, puis :
 
 ```bash
-./scan.sh https://staging.exemple.fr \
-  --active \
-  --har navigation.har
+./scan.sh http://127.0.0.1:3000 --active --har navigation.har
 ```
 
-### Inclure certains corps POST/JSON
+Le HAR fournit les vraies routes et paramètres GET, POST et JSON.
 
-```bash
-./scan.sh https://staging.exemple.fr \
-  --active \
-  --active-post \
-  --har navigation.har
-```
-
-### Deux comptes et scénarios avancés
-
-```bash
-cp config/auth-tests.example.json config/auth-tests.local.json
-cp config/business-scenarios.example.json config/business-scenarios.local.json
-```
-
-Adapte et active uniquement les scénarios compatibles avec la cible, puis :
-
-```bash
-./scan.sh https://staging.exemple.fr \
-  --active \
-  --har navigation.har \
-  --har-user-a user-a.har \
-  --har-user-b user-b.har \
-  --auth-config config/auth-tests.local.json \
-  --scenario-config config/business-scenarios.local.json \
-  --all-auth-tests
-```
-
-### ZAP
-
-```bash
-./scan.sh https://staging.exemple.fr --zap
-./scan.sh https://staging.exemple.fr --active --zap-active
-```
-
-## Organisation des résultats
+## Résultats
 
 ```text
-results/
-└── staging-exemple-fr_443/
-    ├── latest
-    ├── latest-report.html
-    └── 20260724T083015Z_active_a1b2c3d4/
-        ├── 00-meta/              paramètres, environnement, état des outils
-        ├── 01-raw/               sorties brutes et réponses HTTP
-        ├── 02-static/            cartographie et données statiques consolidées
-        ├── 03-dynamic/           HAR, paramètres et mutations (si un HAR est fourni)
-        ├── 04-authentication/    authentification et session (si demandé)
-        ├── 05-access-control/    comparaisons de comptes (si demandé)
-        ├── 06-business-logic/    scénarios métier (si demandé)
-        ├── 07-zap/               rapports ZAP (si demandé)
-        ├── 08-report/            rapport final
-        └── 09-logs/              journal console et logs des modules
+results/<cible>/<date>_<mode>_<id>/
+├── raw/
+├── console.log
+├── report.json
+└── report.html
 ```
 
-Rapport principal :
+Un raccourci vers le dernier rapport est créé dans :
 
 ```text
-08-report/security-assessment.html
+results/<cible>/latest-report.html
 ```
 
-## Interprétation
+## Vérifier que le bon service écoute sur le port 3000
 
-- **confirmed** : observation directement vérifiée par le scanner ;
-- **probable** : comportement fortement suspect à confirmer ;
-- **possible** : indice nécessitant une analyse manuelle.
+```bash
+sudo ss -ltnp | grep ':3000'
+docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
+curl -s http://127.0.0.1:3000 | grep -iE '<title>|juice|selkies'
+```
 
-Une entrée réfléchie n’est pas automatiquement une XSS. Une erreur SQL n’est pas automatiquement une injection exploitable. Une réponse similaire entre deux comptes doit être vérifiée avec la propriété réelle de la ressource.
-
-## Sécurité et limites
-
-- utilise uniquement des cibles autorisées ;
-- privilégie une préproduction ou un laboratoire pour le mode actif ;
-- emploie des comptes et données de test ;
-- ne publie jamais les fichiers HAR ou `*.local.json` ;
-- le test de logout peut fermer la session enregistrée ;
-- certains scénarios POST peuvent modifier les données ;
-- aucune analyse automatisée ne couvre entièrement la logique métier.
+Juice Shop est volontairement vulnérable, mais beaucoup de vulnérabilités sont liées au JavaScript, à une session ou à la logique métier. Un scanner automatisé ne les confirmera pas toutes sans HAR, navigateur dynamique et comptes de test.
